@@ -1,0 +1,15 @@
+[package]
+name = "pixeldraw"
+version = "0.1.0"
+edition = "2024"
+description = "Constrained MCP server for drawing pixel art with MARD bead colors"
+
+[dependencies]
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png"] }
+rmcp = { version = "3.1", features = ["server", "transport-io", "schemars"] }
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
