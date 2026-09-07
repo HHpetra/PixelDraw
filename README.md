@@ -1,10 +1,44 @@
 # PixelDraw
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 A local MCP server that lets AI draw pixel art through explicit coordinates
 and constrained MARD palettes, rather than text-to-image generation.
 
 Rust executes the drawing commands; your MCP client supplies the model.
 PixelDraw itself needs no API key and exposes no network listener.
+
+## What it does
+
+PixelDraw gives an AI assistant a small drawing workspace. You describe what
+to draw in your MCP client; the assistant creates a canvas, queries the
+available colors, places pixels or square brush stamps, inspects the returned
+preview, and continues drawing before saving the result.
+
+- **Precise pixel placement:** draw on a 1..128 pixel-wide and -high canvas
+  with explicit coordinates, rather than asking an image model to imitate pixels.
+- **Constrained colors:** choose a locked 24-, 144-, or 221-color MARD palette
+  and address colors by code or the palette's Chinese names.
+- **Incremental drawing:** combine aligned 1x1, 2x2, 4x4 and 8x8 brushes across
+  multiple calls. An invalid batch is rejected without partially painting it.
+- **Immediate previews:** creation and drawing return an 8x nearest-neighbor
+  PNG so an image-capable client can display the current canvas.
+- **Local export:** save PNGs to a configurable directory without overwriting
+  existing work. The model and its API billing remain the client's responsibility.
+
+Use it for small icons, pixel-art illustrations, and experiments with tool-driven
+AI drawing. It is not a standalone AI model, a photo converter, or a full image editor.
+
+## Gallery
+
+Selected existing artwork from this project's `output/` directory, copied to
+`docs/images/` for GitHub display. The source canvases below are enlarged 8x
+in the exported PNGs; these examples do not guarantee identical model output.
+
+| Croissant | Seaside sunset | Temple of Heaven |
+| --- | --- | --- |
+| ![Pixel-art croissant](docs/images/croissant-32x32.png) | ![Pixel-art seaside sunset](docs/images/seaside-sunset-32x32.png) | ![Pixel-art Temple of Heaven](docs/images/temple-of-heaven-64x64.png) |
+| 32x32 canvas | 32x32 canvas | 64x64 canvas |
 
 ## Install
 
@@ -106,5 +140,5 @@ assuming names transfer between palettes. Use `RUST_LOG=debug` for diagnostics.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for checks and [AGENTS.md](AGENTS.md)
 for detailed drawing guidance and color tables. Code is licensed under
 [MIT](LICENSE); see [THIRD_PARTY.md](THIRD_PARTY.md) for palette provenance
-and the scope of third-party rights. Local reference images and generated
-output are intentionally excluded from the release.
+and the scope of third-party rights. Only the selected gallery images are
+included; local reference images, screenshots and the rest of `output/` remain excluded.

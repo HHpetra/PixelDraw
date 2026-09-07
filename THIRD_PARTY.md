@@ -17,5 +17,8 @@ grant rights to upstream chart artwork, trademarks, or reference photographs.
 ## Dependencies and images
 
 Rust dependencies retain their own licenses; exact versions are in Cargo.lock.
-Local reference photographs, screenshots, and the output directory are not
-part of this release. No rights to those local assets are granted here.
+Selected existing output images are included in docs/images at the maintainer's
+request for README galleries. Their original paths and export dimensions are
+listed in docs/images/README.md. This does not grant rights to any underlying
+third-party reference material. Local reference photographs, screenshots, and
+the rest of the output directory remain excluded.
