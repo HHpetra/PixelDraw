@@ -3,6 +3,10 @@ name = "pixeldraw"
 version = "0.1.0"
 edition = "2024"
 description = "Constrained MCP server for drawing pixel art with MARD bead colors"
+license = "MIT"
+repository = "https://github.com/HHpetra/PixelDraw"
+readme = "README.md"
+rust-version = "1.96"
 
 [dependencies]
 base64 = "0.22"
@@ -13,3 +17,7 @@ serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "sync"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tempfile = "3"
+
+[dev-dependencies]
+serde_json = "1"

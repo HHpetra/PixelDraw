@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -11,10 +12,15 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{ServerHandler, schemars, tool, tool_handler, tool_router};
 use serde::Deserialize;
+use tempfile::NamedTempFile;
 use tokio::sync::Mutex;
 
-use crate::canvas::{Canvas, PixelUpdate};
+use crate::canvas::{BrushSize, Canvas, PixelUpdate};
 use crate::palette::{self, PaletteMode};
+
+const MAX_PIXEL_BYTES: usize = 1024 * 1024;
+const MAX_STAMPS: usize = 65_536;
+const MAX_SAVE_SUFFIX: usize = 100;
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CreateCanvasRequest {
@@ -36,27 +42,32 @@ pub struct ListColorsRequest {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct DrawPixelsRequest {
-    /// 全部像素写成一个字符串：`x y 颜色` 三元组，可用空格或换行分隔。例如 `0 0 正红 0 1 纯黑`。任一非法则整批拒绝。
+    /// 全部像素写成一个字符串：`x y 颜色` 三元组，可用空格或换行分隔。例如 `0 0 正红 0 1 纯黑`。最多 1 MiB（1048576 字节）、65536 个落点。任一非法则整批拒绝。
     pub pixels: String,
+    /// 笔刷大小：`1`、`2`、`4` 或 `8`，默认 `1`。落点必须对齐到笔刷网格，并一次涂满 size×size 方块。
+    #[serde(default)]
+    pub brush: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SaveImageRequest {
-    /// 可选文件名，例如 `cat.png`。不填则按时间戳自动命名。只使用文件名，忽略路径。
+    /// 可选文件名，例如 `cat.png`，不填则按时间戳自动命名，重名时最多尝试 100 个数字后缀。不覆盖已有文件。仅允许 ASCII 字母、数字、点、下划线和连字符；禁止路径、空名、尾点及 Windows 设备名，补全 .png 后最多 200 字节。
     pub filename: Option<String>,
 }
 
 #[derive(Clone)]
 pub struct PixelDraw {
     canvas: Arc<Mutex<Option<Canvas>>>,
+    output_dir: PathBuf,
     tool_router: ToolRouter<Self>,
 }
 
 #[tool_router]
 impl PixelDraw {
-    pub fn new() -> Self {
+    pub fn new(output_dir: PathBuf) -> Self {
         Self {
             canvas: Arc::new(Mutex::new(None)),
+            output_dir,
             tool_router: Self::tool_router(),
         }
     }
@@ -124,16 +135,24 @@ impl PixelDraw {
     }
 
     #[tool(
-        description = "在当前像素图纸上按坐标填色，可多次调用以增量绘制。pixels 是一整段字符串，格式为「x y 颜色」三元组，可用空格或换行分隔，例如「0 0 正红\\n0 1 纯黑」。坐标 (0,0) 为左上角，x 向右、y 向下。颜色必须使用创建时锁定色表中的中文名或 MARD 色号；完整列表请调用 list_colors。格式错误、坐标越界或颜色非法时整批拒绝。返回当前图纸放大 8 倍后的 PNG。"
+        description = "在当前像素图纸上按坐标填色，可多次调用以增量绘制。pixels 是一整段字符串，格式为「x y 颜色」三元组，可用空格或换行分隔，例如「0 0 正红\\n0 1 纯黑」。每次最多 1 MiB（1048576 字节）、65536 个落点，超限整批拒绝。可选 brush 为 1、2、4 或 8（默认 1）：在 (x,y) 涂满左上对齐的 N×N 方块，且 x、y 必须是 N 的倍数（笔刷 2 只能落在 0,2,4,6…），不对齐不吸附。坐标 (0,0) 为左上角。颜色必须使用创建时锁定色表中的中文名或 MARD 色号；完整列表请调用 list_colors。格式错误、笔刷非法、未对齐、越界或颜色非法时整批拒绝。返回当前图纸放大 8 倍后的 PNG。"
     )]
     async fn draw_pixels(
         &self,
-        Parameters(DrawPixelsRequest { pixels }): Parameters<DrawPixelsRequest>,
+        Parameters(DrawPixelsRequest { pixels, brush }): Parameters<DrawPixelsRequest>,
     ) -> Result<CallToolResult, McpError> {
         let updates = match parse_pixels(&pixels) {
             Ok(updates) => updates,
             Err(err) => {
                 return Ok(CallToolResult::error(vec![ContentBlock::text(err)]));
+            }
+        };
+        let brush = match BrushSize::parse(brush) {
+            Ok(brush) => brush,
+            Err(err) => {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(
+                    err.to_string(),
+                )]));
             }
         };
 
@@ -144,13 +163,17 @@ impl PixelDraw {
             )]));
         };
 
-        match canvas.paint(&updates) {
+        match canvas.paint(&updates, brush) {
             Ok(count) => {
                 let png = encode_or_internal(canvas)?;
                 let width = canvas.width();
                 let height = canvas.height();
+                let n = brush.size();
+                let stamps = updates.len();
                 image_result(
-                    format!("已绘制 {count} 个像素，当前图纸 {width}x{height}。"),
+                    format!(
+                        "已绘制 {count} 个像素（笔刷 {n}，{stamps} 个落点），当前图纸 {width}x{height}。"
+                    ),
                     png,
                 )
             }
@@ -161,40 +184,37 @@ impl PixelDraw {
     }
 
     #[tool(
-        description = "将当前像素图纸的 8 倍放大 PNG 保存到项目 output 目录。未创建图纸时不可调用。可选 filename 仅接受文件名（如 cat.png），不填则自动命名。返回保存路径和预览图。"
+        description = "将当前像素图纸快照的 8 倍放大 PNG 原子保存到运行时配置的输出目录，不覆盖已有文件。未创建图纸时不可调用。可选 filename（如 cat.png）仅允许 ASCII 字母、数字、点、下划线和连字符；禁止正反斜杠、空名、.、..、尾点及 Windows 设备名（含扩展名），补全 .png 后最多 200 字节。省略则按时间戳命名，重名时最多尝试 100 个数字后缀。保存失败返回工具错误，成功返回保存路径和预览图。"
     )]
     async fn save_image(
         &self,
         Parameters(SaveImageRequest { filename }): Parameters<SaveImageRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let guard = self.canvas.lock().await;
-        let Some(canvas) = guard.as_ref() else {
+        let snapshot = self.canvas.lock().await.clone();
+        let Some(canvas) = snapshot else {
             return Ok(CallToolResult::error(vec![ContentBlock::text(
                 "尚未创建图纸。请先调用 create_canvas。",
             )]));
         };
 
-        let path = match resolve_output_path(filename.as_deref()) {
-            Ok(path) => path,
+        let name = match filename.as_deref().map(sanitize_filename).transpose() {
+            Ok(name) => name.unwrap_or_else(timestamp_filename),
             Err(err) => {
                 return Ok(CallToolResult::error(vec![ContentBlock::text(err)]));
             }
         };
-        let png = encode_or_internal(canvas)?;
-        if let Some(parent) = path.parent() {
-            if let Err(err) = fs::create_dir_all(parent) {
+        let png = match canvas.encode_png_8x() {
+            Ok(png) => png,
+            Err(err) => {
                 return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                    "无法创建目录 {}: {err}",
-                    parent.display()
+                    "PNG 编码失败: {err}"
                 ))]));
             }
-        }
-        if let Err(err) = fs::write(&path, &png) {
-            return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                "保存失败 {}: {err}",
-                path.display()
-            ))]));
-        }
+        };
+        let path = match persist_png(&self.output_dir, &name, filename.is_none(), &png) {
+            Ok(path) => path,
+            Err(err) => return Ok(CallToolResult::error(vec![ContentBlock::text(err)])),
+        };
         image_result(
             format!(
                 "已保存 {}x{} 像素图（8 倍）到 {}",
@@ -216,7 +236,7 @@ impl ServerHandler for PixelDraw {
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(
-                "PixelDraw：用强约束像素指令绘图，不要直接文生图。先 create_canvas(width, height, palette?) 选定 24、144 或 221 色（默认 221，创建后锁定），用 list_colors 查看颜色，再多次 draw_pixels({pixels:\"x y 颜色 ...\"})（可用换行），完成后用 save_image 落盘。颜色只用当前模式的中文名或 MARD 色号。绘制与保存都会返回 8 倍放大 PNG。",
+                "PixelDraw：用强约束像素指令绘图，不要直接文生图。先 create_canvas(width, height, palette?) 选定 24、144 或 221 色（默认 221，创建后锁定），用 list_colors 查看颜色，再多次 draw_pixels({pixels:\"x y 颜色 ...\", brush?:1|2|4|8})（可用换行；笔刷落点必须对齐网格；每次最多 1 MiB、65536 个落点），完成后用 save_image 将快照原子保存到运行时配置的输出目录，不覆盖已有文件。文件名仅限 ASCII 字母、数字、点、下划线和连字符，禁止路径、空名、尾点及 Windows 设备名，补全 .png 后最多 200 字节；省略时按时间戳命名，重名最多尝试 100 个数字后缀。颜色只用当前模式的中文名或 MARD 色号。绘制与保存都会返回 8 倍放大 PNG。",
             )
     }
 }
@@ -234,20 +254,9 @@ fn image_result(text: impl Into<String>, png: Vec<u8>) -> Result<CallToolResult,
     ]))
 }
 
-fn output_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("output")
-}
-
 fn sanitize_filename(raw: &str) -> Result<String, String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err("文件名不能为空".into());
-    }
-    let name = Path::new(trimmed)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| "文件名无效".to_string())?;
-    if name.is_empty() || name == "." || name == ".." {
+    let name = raw;
+    if name.is_empty() || name.ends_with('.') || name.len() > 200 {
         return Err("文件名无效".into());
     }
     if !name
@@ -256,11 +265,27 @@ fn sanitize_filename(raw: &str) -> Result<String, String> {
     {
         return Err("文件名只能包含字母、数字、点、下划线和连字符".into());
     }
-    if name.to_ascii_lowercase().ends_with(".png") {
-        Ok(name.to_string())
-    } else {
-        Ok(format!("{name}.png"))
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ((stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.len() == 4
+            && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+    {
+        return Err("文件名不能使用 Windows 设备名".into());
     }
+    let name = if name.to_ascii_lowercase().ends_with(".png") {
+        name.to_string()
+    } else {
+        format!("{name}.png")
+    };
+    if name.len() > 200 {
+        return Err("文件名补全 .png 后不能超过 200 字节".into());
+    }
+    Ok(name)
 }
 
 fn timestamp_filename() -> String {
@@ -273,11 +298,17 @@ fn timestamp_filename() -> String {
 
 /// Parse `x y color` triplets separated by any whitespace, including newlines.
 fn parse_pixels(raw: &str) -> Result<Vec<PixelUpdate>, String> {
-    let tokens: Vec<&str> = raw.split_whitespace().collect();
+    if raw.len() > MAX_PIXEL_BYTES {
+        return Err("像素字符串不能超过 1 MiB（1048576 字节）".into());
+    }
+    let tokens: Vec<&str> = raw.split_whitespace().take(MAX_STAMPS * 3 + 1).collect();
+    if tokens.len() > MAX_STAMPS * 3 {
+        return Err("每次最多允许 65536 个落点".into());
+    }
     if tokens.is_empty() {
         return Ok(Vec::new());
     }
-    if tokens.len() % 3 != 0 {
+    if !tokens.len().is_multiple_of(3) {
         return Err(format!(
             "像素字符串格式无效：应为「x y 颜色」三元组（可用空格或换行分隔），当前有 {} 个词，不是 3 的倍数。",
             tokens.len()
@@ -300,12 +331,34 @@ fn parse_pixels(raw: &str) -> Result<Vec<PixelUpdate>, String> {
     Ok(updates)
 }
 
-fn resolve_output_path(filename: Option<&str>) -> Result<PathBuf, String> {
-    let name = match filename {
-        Some(raw) if !raw.trim().is_empty() => sanitize_filename(raw)?,
-        _ => timestamp_filename(),
-    };
-    Ok(output_dir().join(name))
+fn persist_png(
+    output_dir: &Path,
+    name: &str,
+    autogenerated: bool,
+    png: &[u8],
+) -> Result<PathBuf, String> {
+    fs::create_dir_all(output_dir)
+        .map_err(|err| format!("无法创建目录 {}: {err}", output_dir.display()))?;
+    let mut temp = NamedTempFile::new_in(output_dir)
+        .map_err(|err| format!("无法创建临时文件 {}: {err}", output_dir.display()))?;
+    temp.write_all(png)
+        .map_err(|err| format!("写入 PNG 失败: {err}"))?;
+    let attempts = if autogenerated { MAX_SAVE_SUFFIX } else { 0 };
+    for suffix in 0..=attempts {
+        let path = output_dir.join(if suffix == 0 {
+            name.to_string()
+        } else {
+            format!("{}-{suffix}.png", name.strip_suffix(".png").unwrap_or(name))
+        });
+        match temp.persist_noclobber(&path) {
+            Ok(_) => return Ok(path),
+            Err(err) if err.error.kind() == ErrorKind::AlreadyExists && suffix < attempts => {
+                temp = err.file;
+            }
+            Err(err) => return Err(format!("保存失败 {}: {}", path.display(), err.error)),
+        }
+    }
+    unreachable!("bounded save loop always returns on its final attempt")
 }
 
 #[cfg(test)]
@@ -313,19 +366,55 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sanitizes_filename_and_strips_path() {
+    fn validates_filename_without_stripping_paths() {
         assert_eq!(sanitize_filename("cat.png").unwrap(), "cat.png");
         assert_eq!(sanitize_filename("cat").unwrap(), "cat.png");
-        assert_eq!(sanitize_filename(r"..\evil.png").unwrap(), "evil.png");
-        assert!(sanitize_filename(" ").is_err());
-        assert!(sanitize_filename("a b.png").is_err());
+        assert_eq!(sanitize_filename("cat.PNG").unwrap(), "cat.PNG");
+        for name in [
+            "",
+            " ",
+            ".",
+            "..",
+            "cat.",
+            "a b.png",
+            " cat.png",
+            "cat.png ",
+            "../evil.png",
+            r"..\evil.png",
+            "/cat.png",
+            r"C:\cat.png",
+            "猫.png",
+            "con",
+            "PrN.png",
+            "aux.tar.png",
+            "NUL",
+            "COM1.png",
+            "lpt9.PNG",
+        ] {
+            assert!(sanitize_filename(name).is_err(), "{name:?}");
+        }
+        for prefix in ["COM", "LPT"] {
+            for digit in 1..=9 {
+                assert!(sanitize_filename(&format!("{prefix}{digit}.png")).is_err());
+            }
+        }
+        assert!(sanitize_filename("COM0.png").is_ok());
+        assert!(sanitize_filename("LPT10.png").is_ok());
+        assert!(sanitize_filename(&"a".repeat(196)).is_ok());
+        assert!(sanitize_filename(&"a".repeat(197)).is_err());
+        assert!(sanitize_filename(&format!("{}.png", "a".repeat(197))).is_err());
     }
 
     #[test]
-    fn default_path_is_under_output_dir() {
-        let path = resolve_output_path(Some("demo")).unwrap();
-        assert_eq!(path.file_name().unwrap(), "demo.png");
-        assert_eq!(path.parent().unwrap(), output_dir());
+    fn parse_pixels_enforces_byte_and_stamp_limits() {
+        assert!(parse_pixels(&" ".repeat(MAX_PIXEL_BYTES)).is_ok());
+        assert!(parse_pixels(&" ".repeat(MAX_PIXEL_BYTES + 1)).is_err());
+        assert!(parse_pixels(&"　".repeat(MAX_PIXEL_BYTES / 3 + 1)).is_err());
+        assert_eq!(
+            parse_pixels(&"0 0 H2 ".repeat(MAX_STAMPS)).unwrap().len(),
+            MAX_STAMPS
+        );
+        assert!(parse_pixels(&"0 0 H2 ".repeat(MAX_STAMPS + 1)).is_err());
     }
 
     #[test]
@@ -368,7 +457,7 @@ mod tests {
     fn parsed_invalid_color_rejects_whole_batch() {
         let mut canvas = Canvas::new(4, 4, PaletteMode::Colors144).unwrap();
         let updates = parse_pixels("0 0 正红 1 1 彩虹").unwrap();
-        let err = canvas.paint(&updates).unwrap_err();
+        let err = canvas.paint(&updates, BrushSize::One).unwrap_err();
         assert!(err.to_string().contains("未知颜色"));
 
         let png = canvas.encode_png_8x().unwrap();
@@ -383,7 +472,7 @@ mod tests {
     fn parsed_string_paints_pixels() {
         let mut canvas = Canvas::new(4, 4, PaletteMode::Colors144).unwrap();
         let updates = parse_pixels("0 0 正红\n1 2 纯黑").unwrap();
-        assert_eq!(canvas.paint(&updates).unwrap(), 2);
+        assert_eq!(canvas.paint(&updates, BrushSize::One).unwrap(), 2);
         let png = canvas.encode_png_8x().unwrap();
         let img = image::load_from_memory(&png).unwrap().to_rgb8();
         assert_eq!(img.get_pixel(0, 0), &image::Rgb([0xE7, 0x00, 0x2F]));
@@ -391,16 +480,241 @@ mod tests {
     }
 
     #[test]
-    fn writes_png_to_output_dir() {
-        let canvas = Canvas::new(2, 2, PaletteMode::default()).unwrap();
-        let path = resolve_output_path(Some("save-image-test")).unwrap();
+    fn parsed_string_paints_with_brush_two() {
+        let mut canvas = Canvas::new(8, 8, PaletteMode::Colors144).unwrap();
+        let updates = parse_pixels("0 0 正红\n2 0 纯黑").unwrap();
+        assert_eq!(canvas.paint(&updates, BrushSize::Two).unwrap(), 8);
         let png = canvas.encode_png_8x().unwrap();
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, &png).unwrap();
-        let written = fs::read(&path).unwrap();
-        let img = image::load_from_memory(&written).unwrap();
-        assert_eq!(img.width(), 16);
-        assert_eq!(img.height(), 16);
-        let _ = fs::remove_file(&path);
+        let img = image::load_from_memory(&png).unwrap().to_rgb8();
+        assert_eq!(img.get_pixel(8, 8), &image::Rgb([0xE7, 0x00, 0x2F]));
+        assert_eq!(img.get_pixel(16, 0), &image::Rgb([0, 0, 0]));
+        assert_eq!(
+            img.get_pixel(32, 0),
+            &image::Rgb(PaletteMode::Colors144.white_rgb())
+        );
+    }
+
+    fn response_png(result: &CallToolResult) -> Vec<u8> {
+        assert_ne!(result.is_error, Some(true));
+        assert!(result.content[0].as_text().is_some());
+        let image = result.content[1].as_image().unwrap();
+        assert_eq!(image.mime_type, "image/png");
+        STANDARD.decode(&image.data).unwrap()
+    }
+
+    async fn create(server: &PixelDraw) -> CallToolResult {
+        server
+            .create_canvas(Parameters(CreateCanvasRequest {
+                width: 4,
+                height: 4,
+                palette: Some("24".into()),
+            }))
+            .await
+            .unwrap()
+    }
+
+    #[test]
+    fn auto_collision_retries_and_is_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = timestamp_filename();
+        fs::write(dir.path().join(&name), b"original").unwrap();
+        let path = persist_png(dir.path(), &name, true, b"snapshot").unwrap();
+        let stem = name.strip_suffix(".png").unwrap();
+        assert_eq!(path, dir.path().join(format!("{stem}-1.png")));
+        assert_eq!(fs::read(&path).unwrap(), b"snapshot");
+        assert_eq!(fs::read(dir.path().join(&name)).unwrap(), b"original");
+        for suffix in 2..=MAX_SAVE_SUFFIX {
+            fs::write(dir.path().join(format!("{stem}-{suffix}.png")), b"original").unwrap();
+        }
+        assert!(persist_png(dir.path(), &name, true, b"replacement").is_err());
+        assert_eq!(
+            fs::read_dir(dir.path()).unwrap().count(),
+            MAX_SAVE_SUFFIX + 1
+        );
+        assert_eq!(fs::read(path).unwrap(), b"snapshot");
+    }
+
+    #[tokio::test]
+    async fn save_handler_writes_image_and_preserves_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("nested");
+        let server = PixelDraw::new(output.clone());
+        let expected = response_png(&create(&server).await);
+        let result = server
+            .save_image(Parameters(SaveImageRequest {
+                filename: Some("demo".into()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(response_png(&result), expected);
+        assert_eq!(fs::read(output.join("demo.png")).unwrap(), expected);
+        fs::write(output.join("demo.png"), b"existing").unwrap();
+        let result = server
+            .save_image(Parameters(SaveImageRequest {
+                filename: Some("demo".into()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(fs::read(output.join("demo.png")).unwrap(), b"existing");
+        assert_eq!(fs::read_dir(&output).unwrap().count(), 1);
+        let result = server
+            .save_image(Parameters(SaveImageRequest { filename: None }))
+            .await
+            .unwrap();
+        assert_eq!(response_png(&result), expected);
+        assert_eq!(fs::read_dir(&output).unwrap().count(), 2);
+        for filename in ["", "../escape.png", r"..\escape.png", "NUL.png"] {
+            let result = server
+                .save_image(Parameters(SaveImageRequest {
+                    filename: Some(filename.into()),
+                }))
+                .await
+                .unwrap();
+            assert_eq!(result.is_error, Some(true));
+        }
+    }
+
+    #[tokio::test]
+    async fn save_output_failure_is_a_tool_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("not-a-directory");
+        fs::write(&output, b"existing").unwrap();
+        let server = PixelDraw::new(output.clone());
+        create(&server).await;
+        let result = server
+            .save_image(Parameters(SaveImageRequest { filename: None }))
+            .await
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(fs::read(output).unwrap(), b"existing");
+    }
+
+    #[tokio::test]
+    async fn uncreated_handlers_return_tool_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = PixelDraw::new(dir.path().join("output"));
+        let result = server
+            .draw_pixels(Parameters(DrawPixelsRequest {
+                pixels: "0 0 H2".into(),
+                brush: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+        let result = server
+            .save_image(Parameters(SaveImageRequest { filename: None }))
+            .await
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+        assert!(!server.output_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn invalid_create_retains_canvas_and_palette() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = PixelDraw::new(dir.path().to_path_buf());
+        let expected = response_png(&create(&server).await);
+        for (width, height, palette) in [(0, 4, "144"), (4, 129, "221"), (4, 4, "bad")] {
+            let result = server
+                .create_canvas(Parameters(CreateCanvasRequest {
+                    width,
+                    height,
+                    palette: Some(palette.into()),
+                }))
+                .await
+                .unwrap();
+            assert_eq!(result.is_error, Some(true));
+            let guard = server.canvas.lock().await;
+            let canvas = guard.as_ref().unwrap();
+            assert_eq!(canvas.mode(), PaletteMode::Colors24);
+            assert_eq!(canvas.encode_png_8x().unwrap(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_paint_is_atomic_including_brush_and_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = PixelDraw::new(dir.path().to_path_buf());
+        let expected = response_png(&create(&server).await);
+        for (pixels, brush) in [
+            ("0 0 F5 2 2 invalid".into(), Some(2)),
+            ("0 0 F5 4 0 H7".into(), Some(2)),
+            ("0 0 F5 1 0 H7".into(), Some(2)),
+            ("0 0 F5".into(), Some(3)),
+            ("0 0 F5 1".into(), None),
+            ("0 0 正红".into(), None),
+            (" ".repeat(MAX_PIXEL_BYTES + 1), None),
+            ("0 0 F5 ".repeat(MAX_STAMPS + 1), None),
+        ] {
+            let result = server
+                .draw_pixels(Parameters(DrawPixelsRequest { pixels, brush }))
+                .await
+                .unwrap();
+            assert_eq!(result.is_error, Some(true));
+            assert_eq!(
+                server
+                    .canvas
+                    .lock()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    .encode_png_8x()
+                    .unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn palette_lock_image_response_and_independent_instances() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = PixelDraw::new(dir.path().join("first"));
+        let second = PixelDraw::new(dir.path().join("second"));
+        let initial = response_png(&create(&first).await);
+        assert_eq!(response_png(&create(&second).await), initial);
+        let listed = first
+            .list_colors(Parameters(ListColorsRequest {
+                palette: Some("invalid".into()),
+            }))
+            .await
+            .unwrap();
+        assert_ne!(listed.is_error, Some(true));
+        let text = &listed.content[0].as_text().unwrap().text;
+        assert_eq!(
+            text,
+            &format!(
+                "当前图纸已锁定以下色表。\n{}",
+                palette::format_list(PaletteMode::Colors24)
+            )
+        );
+        let painted = first
+            .draw_pixels(Parameters(DrawPixelsRequest {
+                pixels: "0 0 H7".into(),
+                brush: Some(2),
+            }))
+            .await
+            .unwrap();
+        let png = response_png(&painted);
+        let image = image::load_from_memory(&png).unwrap().to_rgb8();
+        assert_eq!(image.dimensions(), (32, 32));
+        assert_eq!(image.get_pixel(15, 15), &image::Rgb([0, 0, 0]));
+        assert_eq!(
+            image.get_pixel(16, 16),
+            &image::Rgb(PaletteMode::Colors24.white_rgb())
+        );
+        assert_ne!(png, initial);
+        assert_eq!(
+            second
+                .canvas
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .encode_png_8x()
+                .unwrap(),
+            initial
+        );
+        assert_ne!(first.output_dir, second.output_dir);
     }
 }

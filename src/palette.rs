@@ -9,17 +9,12 @@ pub struct Color {
 }
 
 /// Palette locked onto a canvas at creation time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum PaletteMode {
     Colors24,
     Colors144,
+    #[default]
     Colors221,
-}
-
-impl Default for PaletteMode {
-    fn default() -> Self {
-        Self::Colors221
-    }
 }
 
 impl PaletteMode {
