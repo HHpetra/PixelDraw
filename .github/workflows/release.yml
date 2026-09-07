@@ -1,0 +1,91 @@
+name: Release binaries
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            executable: pixeldraw.exe
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            executable: pixeldraw
+          - os: macos-14
+            target: aarch64-apple-darwin
+            executable: pixeldraw
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            executable: pixeldraw
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.96.1
+          targets: ${{ matrix.target }}
+      - run: cargo test --locked --release --target ${{ matrix.target }}
+      - run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Package and check executable
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+          EXECUTABLE: ${{ matrix.executable }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $name = "pixeldraw-$env:GITHUB_REF_NAME-$env:TARGET"
+          New-Item -ItemType Directory -Path "dist/$name" -Force | Out-Null
+          Copy-Item "target/$env:TARGET/release/$env:EXECUTABLE" "dist/$name/"
+          Copy-Item README.md, README.zh-CN.md, LICENSE, THIRD_PARTY.md, CONTRIBUTING.md, AGENTS.md "dist/$name/"
+          Copy-Item docs "dist/$name/docs" -Recurse
+          Push-Location "dist/$name"
+          try {
+            & "./$env:EXECUTABLE" --version
+            if ($LASTEXITCODE -ne 0) { throw 'Packaged binary failed' }
+            & "./$env:EXECUTABLE" --help
+            if ($LASTEXITCODE -ne 0) { throw 'Packaged help failed' }
+          } finally { Pop-Location }
+          if ($IsWindows) {
+            $archive = "$name.zip"
+            Compress-Archive -Path "dist/$name" -DestinationPath "dist/$archive"
+          } else {
+            $archive = "$name.tar.gz"
+            tar -czf "dist/$archive" -C dist $name
+            if ($LASTEXITCODE -ne 0) { throw 'Archive failed' }
+          }
+          $hash = (Get-FileHash "dist/$archive" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $archive" | Set-Content "dist/$archive.sha256" -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.target }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: binaries-*
+          merge-multiple: true
+          path: dist
+      - name: Publish draft release for verification
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if ! gh release view "$TAG" > /dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --draft --title "PixelDraw $TAG" --notes "Prebuilt Windows x64, Linux x64, macOS ARM64 and macOS x64 packages. No Rust installation required. See the included README files for setup. Linux requires glibc 2.35 or newer. macOS binaries are unsigned and not notarized. SHA-256 files are provided alongside each archive."
+          fi
+          gh release upload "$TAG" dist/*

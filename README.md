@@ -42,6 +42,67 @@ in the exported PNGs; these examples do not guarantee identical model output.
 
 ## Install
 
+### Download a binary (no Rust required)
+
+Open [Releases](https://github.com/HHpetra/PixelDraw/releases/latest), expand
+**Assets**, and download the archive for your system. Do not choose GitHub's
+automatically generated **Source code** archives.
+
+| System | Archive suffix |
+| --- | --- |
+| Windows x64 | `x86_64-pc-windows-msvc.zip` |
+| Linux x64 (glibc 2.35+, e.g. Ubuntu 22.04+) | `x86_64-unknown-linux-gnu.tar.gz` |
+| macOS Apple Silicon (ARM64) | `aarch64-apple-darwin.tar.gz` |
+| macOS Intel (x64) | `x86_64-apple-darwin.tar.gz` |
+
+Extract the archive to a permanent folder. It contains `pixeldraw.exe` on
+Windows or `pixeldraw` on Linux/macOS, plus documentation. No Rust, Cargo,
+Git or separate model runtime is needed for the server.
+
+Windows PowerShell (example after extraction):
+
+```powershell
+& "C:/Tools/PixelDraw/pixeldraw.exe" --version
+& "C:/Tools/PixelDraw/pixeldraw.exe" --help
+```
+
+Linux/macOS (substitute the actual extracted directory):
+
+```sh
+tar -xzf pixeldraw-v0.1.1-aarch64-apple-darwin.tar.gz
+./pixeldraw-v0.1.1-aarch64-apple-darwin/pixeldraw --version
+```
+
+Use the executable's **absolute path** in your client's MCP configuration:
+
+```json
+{
+  "mcp": {
+    "pixeldraw": {
+      "type": "local",
+      "command": ["C:/Tools/PixelDraw/pixeldraw.exe", "--output-dir", "C:/Pictures/PixelDraw"],
+      "enabled": true
+    }
+  }
+}
+```
+
+On Linux/macOS replace the executable with a path such as
+`/home/you/tools/pixeldraw` or `/Users/you/tools/pixeldraw`, and choose your own
+output directory. This OpenCode example does not invoke Cargo. Restart or
+reload the MCP client after configuration. The client starts the server;
+double-clicking the executable does not open a drawing window.
+
+Each archive has a `.sha256` file. Compare it with `Get-FileHash <archive>
+-Algorithm SHA256` in PowerShell, `sha256sum -c <archive>.sha256` on Linux,
+or `shasum -a 256 -c <archive>.sha256` on macOS. Keep archive and checksum in
+the same directory. Checksums verify integrity, not publisher identity.
+The binaries are not code-signed or notarized; macOS or Windows may show a
+security warning. Verify the download source before using the OS's per-file
+approval flow; do not disable system-wide security protections.
+
+### Build from source (developers)
+
 Install Rust 1.96.1 or newer using [rustup](https://rustup.rs/), then:
 
 ```sh
@@ -52,8 +113,8 @@ pixeldraw --help
 ```
 
 The executable is installed into Cargo's bin directory, which must be on PATH.
-This first release distributes source, not prebuilt binaries. CI checks
-Windows, Linux and macOS; inspect the Actions results for platform status.
+Prebuilt packages are available starting with v0.1.1. CI checks Windows,
+Linux and macOS; inspect the Actions results for platform status.
 
 ## Connect an MCP client
 

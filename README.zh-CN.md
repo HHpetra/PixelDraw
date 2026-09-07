@@ -30,6 +30,55 @@ Rust 程序负责执行绘图指令，MCP 客户端负责提供模型。PixelDra
 
 ## 安装
 
+### 免编译安装（推荐）
+
+打开 [最新 Release](https://github.com/HHpetra/PixelDraw/releases/latest)，展开 **Assets**，下载适合系统的安装包。不要选择 GitHub 自动生成的 **Source code** 源码压缩包。
+
+| 系统 | 文件名后缀 |
+| --- | --- |
+| Windows x64 | `x86_64-pc-windows-msvc.zip` |
+| Linux x64（glibc 2.35 及以上，例如 Ubuntu 22.04 及以上） | `x86_64-unknown-linux-gnu.tar.gz` |
+| macOS Apple Silicon（ARM64，M 系列芯片） | `aarch64-apple-darwin.tar.gz` |
+| macOS Intel（x64） | `x86_64-apple-darwin.tar.gz` |
+
+解压到固定目录。Windows 程序为 `pixeldraw.exe`，Linux/macOS 为 `pixeldraw`，包内附使用文档。运行服务不需要安装 Rust、Cargo、Git 或额外的模型运行环境；AI 模型仍由 MCP 客户端提供。
+
+Windows PowerShell 示例（路径按实际解压位置修改）：
+
+```powershell
+& "C:/Tools/PixelDraw/pixeldraw.exe" --version
+& "C:/Tools/PixelDraw/pixeldraw.exe" --help
+```
+
+Linux/macOS 解压与检查示例（这里以 Apple Silicon 安装包为例）：
+
+```sh
+tar -xzf pixeldraw-v0.1.1-aarch64-apple-darwin.tar.gz
+./pixeldraw-v0.1.1-aarch64-apple-darwin/pixeldraw --version
+```
+
+然后在 OpenCode 中配置程序的**绝对路径**，不再使用 `cargo run`：
+
+```json
+{
+  "mcp": {
+    "pixeldraw": {
+      "type": "local",
+      "command": ["C:/Tools/PixelDraw/pixeldraw.exe", "--output-dir", "C:/Pictures/PixelDraw"],
+      "enabled": true
+    }
+  }
+}
+```
+
+Linux/macOS 将程序路径改为实际位置，例如 `/home/you/tools/pixeldraw` 或 `/Users/you/tools/pixeldraw`，同时替换输出目录。配置完成后重启或重新加载 MCP 客户端，由客户端启动服务。双击程序不会出现绘图窗口，它是供 AI 调用的后台工具。
+
+每个压缩包附有 `.sha256` 校验文件。PowerShell 使用 `Get-FileHash <压缩包> -Algorithm SHA256` 对照校验值；Linux 使用 `sha256sum -c <压缩包>.sha256`；macOS 使用 `shasum -a 256 -c <压缩包>.sha256`。压缩包与校验文件应放在同一目录。校验值用于验证文件完整性，不等于发布者身份签名。
+
+程序尚未进行代码签名或 macOS 公证，系统可能显示安全提示。确认来自本仓库 Release 后，按系统提供的单文件批准流程处理，不要关闭系统级安全防护。
+
+### 源码安装（开发者）
+
 通过 [rustup](https://rustup.rs/) 安装 Rust 1.96.1 或更新版本，然后执行：
 
 ```sh
@@ -39,7 +88,7 @@ cargo install --path . --locked
 pixeldraw --help
 ```
 
-程序安装到 Cargo 的 bin 目录，该目录需要在 PATH 中。当前提供源码安装，不提供预编译二进制。CI 在 Windows、Linux 和 macOS 上运行，具体结果可查看仓库 Actions 页面。
+程序安装到 Cargo 的 bin 目录，该目录需要在 PATH 中。从 v0.1.1 开始提供预编译安装包。CI 在 Windows、Linux 和 macOS 上运行，具体结果可查看仓库 Actions 页面。
 
 ## 连接 MCP 客户端
 
