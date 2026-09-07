@@ -84,9 +84,9 @@ versions may differ in image display and configuration support.
 
 ## Draw your first image
 
-Ask your client: "Use PixelDraw to create a 16x16 pixel-art icon with the
-24-color palette. Query the colors, draw it with aligned brushes, then save
-it as first-icon.png."
+Ask your client:
+
+> Please use MCP tools to draw a pixel-art seaside sunset. The canvas size should be 32*32.
 
 Minimal tool sequence (arguments shown as JSON):
 
