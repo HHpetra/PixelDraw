@@ -219,3 +219,72 @@ fn cli_help_and_unknown_argument_exit_without_a_handshake() {
     let mut unknown = Process::spawn(cwd.path(), &[std::ffi::OsStr::new("--unknown-test-option")]);
     assert!(!unknown.wait().success());
 }
+
+#[test]
+fn stdio_exports_both_with_empty_background_and_clear() {
+    let output = tempfile::tempdir().unwrap();
+    let mut process = Process::spawn(
+        output.path(),
+        &[
+            std::ffi::OsStr::new("--output-dir"),
+            output.path().as_os_str(),
+        ],
+    );
+    process.request(1,"initialize",json!({"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"export-test","version":"1"}}));
+    process.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+    let schema = process.request(2, "tools/list", json!({}));
+    let save = schema["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "save_image")
+        .unwrap();
+    let reference = save["inputSchema"]["properties"]["output"]["$ref"]
+        .as_str()
+        .unwrap();
+    let output_schema = save["inputSchema"]
+        .pointer(reference.trim_start_matches('#'))
+        .unwrap();
+    assert_eq!(output_schema["enum"], json!(["pixel", "pattern", "both"]));
+    let created = process.request(
+        3,
+        "tools/call",
+        json!({"name":"create_canvas","arguments":{"width":8,"height":8,"background":"empty"}}),
+    );
+    let blank = image::load_from_memory(&response_png(&created))
+        .unwrap()
+        .to_rgba8();
+    assert!(blank.pixels().all(|p| p.0[3] == 0));
+    process.request(
+        4,
+        "tools/call",
+        json!({"name":"draw_pixels","arguments":{"pixels":"0 0 H2 1 0 H7 2 0 A1 2 0 -"}}),
+    );
+    let saved = process.request(
+        5,
+        "tools/call",
+        json!({"name":"save_image","arguments":{"filename":"test","output":"both"}}),
+    );
+    assert_ne!(saved["isError"], true);
+    let images: Vec<_> = saved["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|b| b["type"] == "image")
+        .collect();
+    assert_eq!(images.len(), 2);
+    for (block, name) in images.iter().zip(["test.png", "test-pattern.png"]) {
+        assert_eq!(
+            std::fs::read(output.path().join(name)).unwrap(),
+            STANDARD.decode(block["data"].as_str().unwrap()).unwrap()
+        );
+    }
+    let pixels = image::open(output.path().join("test.png"))
+        .unwrap()
+        .to_rgba8();
+    assert_eq!(pixels.get_pixel(0, 0).0, [254, 255, 255, 255]);
+    assert_eq!(pixels.get_pixel(8, 0).0, [0, 0, 0, 255]);
+    assert_eq!(pixels.get_pixel(16, 0).0[3], 0);
+    let chart = image::open(output.path().join("test-pattern.png")).unwrap();
+    assert!(chart.width() > pixels.width());
+}

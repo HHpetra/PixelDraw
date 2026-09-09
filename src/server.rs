@@ -17,10 +17,28 @@ use tokio::sync::Mutex;
 
 use crate::canvas::{BrushSize, Canvas, PixelUpdate};
 use crate::palette::{self, PaletteMode};
+use crate::pattern;
 
 const MAX_PIXEL_BYTES: usize = 1024 * 1024;
 const MAX_STAMPS: usize = 65_536;
 const MAX_SAVE_SUFFIX: usize = 100;
+
+#[derive(Debug, Default, Clone, Copy, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Background {
+    #[default]
+    White,
+    Empty,
+}
+
+#[derive(Debug, Default, Clone, Copy, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportOutput {
+    #[default]
+    Pixel,
+    Pattern,
+    Both,
+}
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CreateCanvasRequest {
@@ -31,6 +49,9 @@ pub struct CreateCanvasRequest {
     /// 色表模式：`24`、`144` 或 `221`。省略则默认 `221`。创建后锁定，绘制中途不可更改。
     #[serde(default)]
     pub palette: Option<String>,
+    /// 背景：white（默认，H2 白豆）或 empty（空格，不放豆）。
+    #[serde(default)]
+    pub background: Background,
 }
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
@@ -53,6 +74,9 @@ pub struct DrawPixelsRequest {
 pub struct SaveImageRequest {
     /// 可选文件名，例如 `cat.png`，不填则按时间戳自动命名，重名时最多尝试 100 个数字后缀。不覆盖已有文件。仅允许 ASCII 字母、数字、点、下划线和连字符；禁止路径、空名、尾点及 Windows 设备名，补全 .png 后最多 200 字节。
     pub filename: Option<String>,
+    /// pixel（默认）：8 倍像素画；pattern：带逐格色号及数量图例的 PNG；both：两者。
+    #[serde(default)]
+    pub output: ExportOutput,
 }
 
 #[derive(Clone)]
@@ -73,7 +97,7 @@ impl PixelDraw {
     }
 
     #[tool(
-        description = "创建指定尺寸的空白像素图纸，用白色铺满。宽和高必须在 1 到 128 之间。(0,0) 为左上角。palette 为色表模式：\"24\"、\"144\" 或 \"221\"，默认 \"221\"。色表在创建时锁定，绘制中途不可更改；要换色表请重新 create_canvas（会覆盖当前图纸）。返回放大 8 倍后的 PNG。"
+        description = "创建指定尺寸的像素图纸。background 可选 white（默认，H2 白豆）或 empty（透明空格，不计豆数）。宽和高必须在 1 到 128 之间。(0,0) 为左上角。palette 为色表模式：\"24\"、\"144\" 或 \"221\"，默认 \"221\"。色表在创建时锁定，绘制中途不可更改；要换色表请重新 create_canvas（会覆盖当前图纸）。返回放大 8 倍后的 PNG。"
     )]
     async fn create_canvas(
         &self,
@@ -81,6 +105,7 @@ impl PixelDraw {
             width,
             height,
             palette,
+            background,
         }): Parameters<CreateCanvasRequest>,
     ) -> Result<CallToolResult, McpError> {
         let mode = match PaletteMode::parse(palette.as_deref()) {
@@ -89,7 +114,10 @@ impl PixelDraw {
                 return Ok(CallToolResult::error(vec![ContentBlock::text(err)]));
             }
         };
-        let canvas = match Canvas::new(width, height, mode) {
+        let canvas = match match background {
+            Background::White => Canvas::new(width, height, mode),
+            Background::Empty => Canvas::new_empty(width, height, mode),
+        } {
             Ok(canvas) => canvas,
             Err(err) => {
                 return Ok(CallToolResult::error(vec![ContentBlock::text(
@@ -101,7 +129,8 @@ impl PixelDraw {
         *self.canvas.lock().await = Some(canvas);
         image_result(
             format!(
-                "已创建 {width}x{height} 像素图纸，底色为白色，已锁定 {} 色模式。请用 list_colors 查看可用颜色，用 draw_pixels 按坐标填色。绘制中途不能切换色表。",
+                "已创建 {width}x{height} 像素图纸，背景为 {:?}，已锁定 {} 色模式。请用 list_colors 查看可用颜色，用 draw_pixels 按坐标填色。绘制中途不能切换色表。",
+                background,
                 mode.as_str()
             ),
             png,
@@ -135,7 +164,7 @@ impl PixelDraw {
     }
 
     #[tool(
-        description = "在当前像素图纸上按坐标填色，可多次调用以增量绘制。pixels 是一整段字符串，格式为「x y 颜色」三元组，可用空格或换行分隔，例如「0 0 正红\\n0 1 纯黑」。每次最多 1 MiB（1048576 字节）、65536 个落点，超限整批拒绝。可选 brush 为 1、2、4 或 8（默认 1）：在 (x,y) 涂满左上对齐的 N×N 方块，且 x、y 必须是 N 的倍数（笔刷 2 只能落在 0,2,4,6…），不对齐不吸附。坐标 (0,0) 为左上角。颜色必须使用创建时锁定色表中的中文名或 MARD 色号；完整列表请调用 list_colors。格式错误、笔刷非法、未对齐、越界或颜色非法时整批拒绝。返回当前图纸放大 8 倍后的 PNG。"
+        description = "在当前像素图纸上按坐标填色，可多次调用以增量绘制。pixels 是一整段字符串，格式为「x y 颜色」三元组，可用空格或换行分隔，例如「0 0 正红\\n0 1 纯黑」。每次最多 1 MiB（1048576 字节）、65536 个落点，超限整批拒绝。可选 brush 为 1、2、4 或 8（默认 1）：在 (x,y) 涂满左上对齐的 N×N 方块，且 x、y 必须是 N 的倍数（笔刷 2 只能落在 0,2,4,6…），不对齐不吸附。坐标 (0,0) 为左上角。颜色必须使用创建时锁定色表中的中文名或 MARD 色号；用 - 清除为空格（不是 H2 白豆）；完整列表请调用 list_colors。格式错误、笔刷非法、未对齐、越界或颜色非法时整批拒绝。返回当前图纸放大 8 倍后的 PNG。"
     )]
     async fn draw_pixels(
         &self,
@@ -184,11 +213,11 @@ impl PixelDraw {
     }
 
     #[tool(
-        description = "将当前像素图纸快照的 8 倍放大 PNG 原子保存到运行时配置的输出目录，不覆盖已有文件。未创建图纸时不可调用。可选 filename（如 cat.png）仅允许 ASCII 字母、数字、点、下划线和连字符；禁止正反斜杠、空名、.、..、尾点及 Windows 设备名（含扩展名），补全 .png 后最多 200 字节。省略则按时间戳命名，重名时最多尝试 100 个数字后缀。保存失败返回工具错误，成功返回保存路径和预览图。"
+        description = "导出当前快照：output 为 pixel（默认，8 倍 PNG）、pattern（带网格、逐格 MARD 色号、矩形色号与数量图例的 PNG）或 both（两者）。空格留白、不计数；H2 是白豆。both 使用 filename 保存像素画，并在扩展名前加 -pattern 保存图纸。每个文件原子保存且不覆盖；多文件并非事务，如遇中途磁盘故障会返回已保存路径。未创建图纸时不可调用。可选 filename（如 cat.png）仅允许 ASCII 字母、数字、点、下划线和连字符；禁止正反斜杠、空名、.、..、尾点及 Windows 设备名（含扩展名），补全 .png 后最多 200 字节。省略则按时间戳命名，重名时最多尝试 100 个数字后缀。保存失败返回工具错误，成功返回保存路径和预览图。"
     )]
     async fn save_image(
         &self,
-        Parameters(SaveImageRequest { filename }): Parameters<SaveImageRequest>,
+        Parameters(SaveImageRequest { filename, output }): Parameters<SaveImageRequest>,
     ) -> Result<CallToolResult, McpError> {
         let snapshot = self.canvas.lock().await.clone();
         let Some(canvas) = snapshot else {
@@ -203,27 +232,42 @@ impl PixelDraw {
                 return Ok(CallToolResult::error(vec![ContentBlock::text(err)]));
             }
         };
-        let png = match canvas.encode_png_8x() {
-            Ok(png) => png,
-            Err(err) => {
-                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                    "PNG 编码失败: {err}"
-                ))]));
-            }
-        };
-        let path = match persist_png(&self.output_dir, &name, filename.is_none(), &png) {
-            Ok(path) => path,
+        let mut exports = Vec::new();
+        if matches!(output, ExportOutput::Pixel | ExportOutput::Both) {
+            exports.push((name.clone(), encode_or_internal(&canvas)?));
+        }
+        if matches!(output, ExportOutput::Pattern | ExportOutput::Both) {
+            let pattern_name = if matches!(output, ExportOutput::Both) {
+                match sanitize_filename(&format!("{}-pattern.png", &name[..name.len() - 4])) {
+                    Ok(name) => name,
+                    Err(err) => return Ok(CallToolResult::error(vec![ContentBlock::text(err)])),
+                }
+            } else {
+                name
+            };
+            let png = pattern::encode_png(&canvas).map_err(|err| {
+                McpError::internal_error(format!("图纸 PNG 编码失败: {err}"), None)
+            })?;
+            exports.push((pattern_name, png));
+        }
+        let paths = match persist_exports(&self.output_dir, &exports, filename.is_none()) {
+            Ok(paths) => paths,
             Err(err) => return Ok(CallToolResult::error(vec![ContentBlock::text(err)])),
         };
-        image_result(
-            format!(
-                "已保存 {}x{} 像素图（8 倍）到 {}",
-                canvas.width(),
-                canvas.height(),
-                path.display()
-            ),
-            png,
-        )
+        let mut content = vec![ContentBlock::text(format!(
+            "已保存 {}x{}，output={output:?}：{}",
+            canvas.width(),
+            canvas.height(),
+            paths
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))];
+        for (_, png) in exports {
+            content.push(ContentBlock::image(STANDARD.encode(png), "image/png"));
+        }
+        Ok(CallToolResult::success(content))
     }
 }
 
@@ -236,7 +280,7 @@ impl ServerHandler for PixelDraw {
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(
-                "PixelDraw：用强约束像素指令绘图，不要直接文生图。先 create_canvas(width, height, palette?) 选定 24、144 或 221 色（默认 221，创建后锁定），用 list_colors 查看颜色，再多次 draw_pixels({pixels:\"x y 颜色 ...\", brush?:1|2|4|8})（可用换行；笔刷落点必须对齐网格；每次最多 1 MiB、65536 个落点），完成后用 save_image 将快照原子保存到运行时配置的输出目录，不覆盖已有文件。文件名仅限 ASCII 字母、数字、点、下划线和连字符，禁止路径、空名、尾点及 Windows 设备名，补全 .png 后最多 200 字节；省略时按时间戳命名，重名最多尝试 100 个数字后缀。颜色只用当前模式的中文名或 MARD 色号。绘制与保存都会返回 8 倍放大 PNG。",
+                "PixelDraw：用强约束像素指令绘图，不要直接文生图。先 create_canvas(width, height, palette?) 选定 24、144 或 221 色（默认 221，创建后锁定），用 list_colors 查看颜色，再多次 draw_pixels({pixels:\"x y 颜色 ...\", brush?:1|2|4|8})（可用换行；笔刷落点必须对齐网格；每次最多 1 MiB、65536 个落点），完成后用 save_image 将快照原子保存到运行时配置的输出目录，不覆盖已有文件。文件名仅限 ASCII 字母、数字、点、下划线和连字符，禁止路径、空名、尾点及 Windows 设备名，补全 .png 后最多 200 字节；省略时按时间戳命名，重名最多尝试 100 个数字后缀。颜色只用当前模式的中文名或 MARD 色号。绘制返回 8 倍 PNG；save_image 的 output 可选 pixel（默认）、pattern 或 both。background 可选 white（默认）或 empty；draw_pixels 用 - 清空格，H2 仍是白色豆。图纸使用每格色号及矩形色号/数量图例；空格不标号、不计数。",
             )
     }
 }
@@ -331,6 +375,57 @@ fn parse_pixels(raw: &str) -> Result<Vec<PixelUpdate>, String> {
     Ok(updates)
 }
 
+/// Preflight the complete set before writing. Each file is atomic, but a set is
+/// not a filesystem transaction: report already saved files on a late failure.
+fn persist_exports(
+    output_dir: &Path,
+    exports: &[(String, Vec<u8>)],
+    autogenerated: bool,
+) -> Result<Vec<PathBuf>, String> {
+    if exports.len() == 1 {
+        return persist_png(output_dir, &exports[0].0, autogenerated, &exports[0].1)
+            .map(|p| vec![p]);
+    }
+    let attempts = if autogenerated { MAX_SAVE_SUFFIX } else { 0 };
+    for suffix in 0..=attempts {
+        let names: Vec<String> = exports
+            .iter()
+            .map(|(name, _)| {
+                if suffix == 0 {
+                    name.clone()
+                } else {
+                    format!("{}-{suffix}.png", &name[..name.len() - 4])
+                }
+            })
+            .collect();
+        let mut collision = false;
+        for name in &names {
+            if output_dir
+                .join(name)
+                .try_exists()
+                .map_err(|e| e.to_string())?
+            {
+                collision = true;
+            }
+        }
+        if collision {
+            if suffix < attempts {
+                continue;
+            }
+            return Err("保存失败：至少一个输出文件已存在；未写入任何文件".into());
+        }
+        let mut paths = Vec::new();
+        for (name, (_, bytes)) in names.iter().zip(exports) {
+            match persist_png(output_dir, name, false, bytes) {
+                Ok(path) => paths.push(path),
+                Err(err) => return Err(format!("{err}；本次已保存：{paths:?}")),
+            }
+        }
+        return Ok(paths);
+    }
+    unreachable!("bounded export loop")
+}
+
 fn persist_png(
     output_dir: &Path,
     name: &str,
@@ -364,6 +459,99 @@ fn persist_png(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn export_modes_and_companion_collision() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = PixelDraw::new(dir.path().to_path_buf());
+        create(&server).await;
+        for (output, name, image_count) in [
+            (ExportOutput::Pixel, "pixel", 1),
+            (ExportOutput::Pattern, "chart", 1),
+            (ExportOutput::Both, "pair.PNG", 2),
+        ] {
+            let r = server
+                .save_image(Parameters(SaveImageRequest {
+                    filename: Some(name.into()),
+                    output,
+                }))
+                .await
+                .unwrap();
+            assert_ne!(r.is_error, Some(true));
+            assert_eq!(
+                r.content.iter().filter(|c| c.as_image().is_some()).count(),
+                image_count
+            );
+        }
+        assert!(dir.path().join("pair.PNG").exists());
+        assert!(dir.path().join("pair-pattern.png").exists());
+        let pixel = image::open(dir.path().join("pixel.png")).unwrap();
+        let chart = image::open(dir.path().join("chart.png")).unwrap();
+        assert_eq!((pixel.width(), pixel.height()), (32, 32));
+        assert!(chart.width() > pixel.width());
+        fs::write(dir.path().join("blocked-pattern.png"), b"keep").unwrap();
+        let r = server
+            .save_image(Parameters(SaveImageRequest {
+                filename: Some("blocked".into()),
+                output: ExportOutput::Both,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(r.is_error, Some(true));
+        assert!(!dir.path().join("blocked.png").exists());
+        assert_eq!(
+            fs::read(dir.path().join("blocked-pattern.png")).unwrap(),
+            b"keep"
+        );
+        // Validate the derived filename before writing the first file.
+        let r = server
+            .save_image(Parameters(SaveImageRequest {
+                filename: Some("a".repeat(196)),
+                output: ExportOutput::Both,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(r.is_error, Some(true));
+        assert!(!dir.path().join(format!("{}.png", "a".repeat(196))).exists());
+    }
+
+    #[test]
+    fn defaults_and_invalid_output_are_typed() {
+        let req: SaveImageRequest = serde_json::from_str("{}").unwrap();
+        assert!(matches!(req.output, ExportOutput::Pixel));
+        assert!(serde_json::from_str::<SaveImageRequest>(r#"{"output":"unknown"}"#).is_err());
+        let req: CreateCanvasRequest = serde_json::from_str(r#"{"width":1,"height":1}"#).unwrap();
+        assert!(matches!(req.background, Background::White));
+        assert!(
+            serde_json::from_str::<CreateCanvasRequest>(
+                r#"{"width":1,"height":1,"background":"unknown"}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn export_set_retries_names_and_reports_late_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a-pattern.png"), b"keep").unwrap();
+        let exports = vec![("a.png".into(), vec![1]), ("a-pattern.png".into(), vec![2])];
+        let paths = persist_exports(dir.path(), &exports, true).unwrap();
+        assert_eq!(
+            paths,
+            vec![
+                dir.path().join("a-1.png"),
+                dir.path().join("a-pattern-1.png")
+            ]
+        );
+        // A nested invalid target simulates an I/O failure after the first persist.
+        let exports = vec![
+            ("first.png".into(), vec![1]),
+            ("missing/second.png".into(), vec![2]),
+        ];
+        let err = persist_exports(dir.path(), &exports, false).unwrap_err();
+        assert!(err.contains("first.png"));
+        assert_eq!(fs::read(dir.path().join("first.png")).unwrap(), vec![1]);
+    }
 
     #[test]
     fn validates_filename_without_stripping_paths() {
@@ -505,6 +693,7 @@ mod tests {
     async fn create(server: &PixelDraw) -> CallToolResult {
         server
             .create_canvas(Parameters(CreateCanvasRequest {
+                background: Background::White,
                 width: 4,
                 height: 4,
                 palette: Some("24".into()),
@@ -542,6 +731,7 @@ mod tests {
         let expected = response_png(&create(&server).await);
         let result = server
             .save_image(Parameters(SaveImageRequest {
+                output: ExportOutput::Pixel,
                 filename: Some("demo".into()),
             }))
             .await
@@ -551,6 +741,7 @@ mod tests {
         fs::write(output.join("demo.png"), b"existing").unwrap();
         let result = server
             .save_image(Parameters(SaveImageRequest {
+                output: ExportOutput::Pixel,
                 filename: Some("demo".into()),
             }))
             .await
@@ -559,7 +750,10 @@ mod tests {
         assert_eq!(fs::read(output.join("demo.png")).unwrap(), b"existing");
         assert_eq!(fs::read_dir(&output).unwrap().count(), 1);
         let result = server
-            .save_image(Parameters(SaveImageRequest { filename: None }))
+            .save_image(Parameters(SaveImageRequest {
+                output: ExportOutput::Pixel,
+                filename: None,
+            }))
             .await
             .unwrap();
         assert_eq!(response_png(&result), expected);
@@ -567,6 +761,7 @@ mod tests {
         for filename in ["", "../escape.png", r"..\escape.png", "NUL.png"] {
             let result = server
                 .save_image(Parameters(SaveImageRequest {
+                    output: ExportOutput::Pixel,
                     filename: Some(filename.into()),
                 }))
                 .await
@@ -583,7 +778,10 @@ mod tests {
         let server = PixelDraw::new(output.clone());
         create(&server).await;
         let result = server
-            .save_image(Parameters(SaveImageRequest { filename: None }))
+            .save_image(Parameters(SaveImageRequest {
+                output: ExportOutput::Pixel,
+                filename: None,
+            }))
             .await
             .unwrap();
         assert_eq!(result.is_error, Some(true));
@@ -603,7 +801,10 @@ mod tests {
             .unwrap();
         assert_eq!(result.is_error, Some(true));
         let result = server
-            .save_image(Parameters(SaveImageRequest { filename: None }))
+            .save_image(Parameters(SaveImageRequest {
+                output: ExportOutput::Pixel,
+                filename: None,
+            }))
             .await
             .unwrap();
         assert_eq!(result.is_error, Some(true));
@@ -618,6 +819,7 @@ mod tests {
         for (width, height, palette) in [(0, 4, "144"), (4, 129, "221"), (4, 4, "bad")] {
             let result = server
                 .create_canvas(Parameters(CreateCanvasRequest {
+                    background: Background::White,
                     width,
                     height,
                     palette: Some(palette.into()),

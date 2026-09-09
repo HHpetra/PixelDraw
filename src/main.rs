@@ -1,5 +1,6 @@
 mod canvas;
 mod palette;
+mod pattern;
 mod server;
 
 use rmcp::{ServiceExt, transport::stdio};
