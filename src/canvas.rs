@@ -65,6 +65,9 @@ pub enum CanvasError {
         color: String,
         mode: PaletteMode,
     },
+    InvalidOp {
+        message: String,
+    },
 }
 
 impl std::fmt::Display for CanvasError {
@@ -103,6 +106,9 @@ impl std::fmt::Display for CanvasError {
                     "未知颜色「{color}」。当前为 {} 色模式，请使用该模式中的中文名或 MARD 色号。调用 list_colors 查看完整列表。",
                     mode.as_str()
                 )
+            }
+            Self::InvalidOp { message } => {
+                write!(f, "{message}")
             }
         }
     }

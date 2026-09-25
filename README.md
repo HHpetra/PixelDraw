@@ -175,10 +175,11 @@ image tool results.
 | `draw_circle` | Circle; `fill` selects filled vs stroked, stroke uses `brush` width. |
 | `draw_ellipse` | Ellipse; `fill` selects filled vs stroked, stroke uses `brush` width. |
 | `flood_fill` | Four-connected fill of the seed's current color. |
+| `draw_batch` | Ordered atomic batch; any failure rejects the whole batch; one final preview. |
 | `draw_pixels` | Scatter points / square brush stamps as `x y color` triples. |
 | `save_image` | Saves the current 8x PNG without overwriting existing files. |
 
-- Coordinates start at the top left. Review the preview and keep adjusting. `list_colors` is not a required step.
+- Prefer `draw_batch` for multi-stroke work; do not call drawing tools in parallel. Review the preview and keep adjusting.
 - Stroke/line `brush` sizes are 1, 2, 4 or 8, expanded around each raster point.
   Fills and flood fill ignore brush size.
 - For `draw_pixels`, brush positions must be multiples of the brush size, and

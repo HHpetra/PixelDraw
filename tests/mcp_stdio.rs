@@ -144,6 +144,7 @@ fn stdio_draws_and_saves_outside_the_working_directory() {
         names,
         [
             "create_canvas",
+            "draw_batch",
             "draw_circle",
             "draw_ellipse",
             "draw_line",

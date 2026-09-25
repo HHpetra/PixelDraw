@@ -154,6 +154,83 @@ pub struct FloodFillRequest {
     pub color: String,
 }
 
+/// One drawing step inside `draw_batch`. Discriminated by `type`.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DrawOp {
+    /// 直线
+    Line {
+        x0: u32,
+        y0: u32,
+        x1: u32,
+        y1: u32,
+        color: String,
+        #[serde(default)]
+        brush: Option<u32>,
+    },
+    /// 矩形，fill 为 true 填充、false 描边
+    Rect {
+        x0: u32,
+        y0: u32,
+        x1: u32,
+        y1: u32,
+        color: String,
+        fill: bool,
+        #[serde(default)]
+        brush: Option<u32>,
+    },
+    /// 三角形
+    Triangle {
+        x0: u32,
+        y0: u32,
+        x1: u32,
+        y1: u32,
+        x2: u32,
+        y2: u32,
+        color: String,
+        fill: bool,
+        #[serde(default)]
+        brush: Option<u32>,
+    },
+    /// 圆
+    Circle {
+        cx: u32,
+        cy: u32,
+        radius: u32,
+        color: String,
+        fill: bool,
+        #[serde(default)]
+        brush: Option<u32>,
+    },
+    /// 椭圆
+    Ellipse {
+        cx: u32,
+        cy: u32,
+        rx: u32,
+        ry: u32,
+        color: String,
+        fill: bool,
+        #[serde(default)]
+        brush: Option<u32>,
+    },
+    /// 油漆桶
+    FloodFill { x: u32, y: u32, color: String },
+    /// 与 draw_pixels 相同的点阵/方块笔刷落点
+    Pixels {
+        pixels: String,
+        #[serde(default)]
+        brush: Option<u32>,
+    },
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DrawBatchRequest {
+    /// 有序绘制操作；按数组顺序执行。任一步失败则整批拒绝、画布不变。最多 256 步。
+    pub ops: Vec<DrawOp>,
+}
+
+const MAX_BATCH_OPS: usize = 256;
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SaveImageRequest {
     /// 可选文件名，例如 `cat.png`，不填则按时间戳自动命名，重名时最多尝试 100 个数字后缀。不覆盖已有文件。仅允许 ASCII 字母、数字、点、下划线和连字符；禁止路径、空名、尾点及 Windows 设备名，补全 .png 后最多 200 字节。
@@ -409,6 +486,54 @@ impl PixelDraw {
         self.with_canvas(|canvas| canvas.flood_fill(x, y, &color)).await
     }
 
+    #[tool(
+        description = "批量绘制：将多条有序操作一次提交、原子执行，只返回最终一张预览。适合需要多笔时一次画完，避免并行调用多个绘制工具造成顺序混乱。ops 数组按顺序执行，每项用 type 区分：line / rect / triangle / circle / ellipse / flood_fill / pixels（参数与对应单笔工具相同）。任一步非法则整批拒绝且画布不变。最多 256 步。尽量使用像素绘制；大面积再用本工具的图元。"
+    )]
+    async fn draw_batch(
+        &self,
+        Parameters(DrawBatchRequest { ops }): Parameters<DrawBatchRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        if ops.len() > MAX_BATCH_OPS {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                "批量操作不能超过 {MAX_BATCH_OPS} 步，当前 {} 步。",
+                ops.len()
+            ))]));
+        }
+        if ops.is_empty() {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(
+                "ops 不能为空。",
+            )]));
+        }
+        let mut guard = self.canvas.lock().await;
+        let Some(canvas) = guard.as_mut() else {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(
+                "尚未创建图纸。请先调用 create_canvas。",
+            )]));
+        };
+        let backup = canvas.clone();
+        let mut total = 0usize;
+        for (index, op) in ops.iter().enumerate() {
+            match apply_draw_op(canvas, op) {
+                Ok(count) => total += count,
+                Err(err) => {
+                    *canvas = backup;
+                    return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                        "批量第 {} 步失败，整批已拒绝：{err}",
+                        index + 1
+                    ))]));
+                }
+            }
+        }
+        let png = encode_or_internal(canvas)?;
+        let width = canvas.width();
+        let height = canvas.height();
+        let steps = ops.len();
+        image_result(
+            format!("批量已执行 {steps} 步，共绘制 {total} 个像素，当前图纸 {width}x{height}。"),
+            png,
+        )
+    }
+
     async fn with_canvas<F>(&self, op: F) -> Result<CallToolResult, McpError>
     where
         F: FnOnce(&mut Canvas) -> Result<usize, CanvasError>,
@@ -488,8 +613,80 @@ impl ServerHandler for PixelDraw {
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(
-                "PixelDraw：用强约束像素指令绘图，不要直接文生图。尽量使用像素绘制；其他工具（draw_line / draw_rect / draw_triangle / draw_circle / draw_ellipse / flood_fill）仅用于大面积绘制。流程：create_canvas(width, height, palette?) 建图并锁定 24/144/221 色（默认 221）→ 用 draw_pixels 精确描点，大面积可再用图元辅助 → 查看返回的 8 倍预览，继续修改和调整 → 满意后 save_image 保存。矩形、三角形、圆、椭圆用 fill=true|false 区分填充/描边；直线与描边可用 brush=1|2|4|8 控制线宽（不要求网格对齐）。draw_pixels 落点须对齐笔刷网格。list_colors 只在需要查色时调用，不是必经步骤。颜色只用当前模式的中文名或 MARD 色号。save_image 不覆盖已有文件；文件名仅限 ASCII 字母、数字、点、下划线和连字符。",
+                "PixelDraw：用强约束像素指令绘图，不要直接文生图。尽量使用像素绘制；其他图元仅用于大面积绘制。多笔绘制请一次调用 draw_batch（ops 有序数组，原子执行，只回最终预览）；单笔可用 draw_line / draw_rect / draw_triangle / draw_circle / draw_ellipse / flood_fill / draw_pixels。禁止并行调用多个绘制工具，会打乱顺序。流程：create_canvas(width, height, palette?) 建图并锁定色表 → draw_batch 或单笔工具作画 → 看 8 倍预览继续修改调整 → save_image 保存。矩形、三角形、圆、椭圆用 fill=true|false 区分填充/描边；直线与描边可用 brush=1|2|4|8 控制线宽（不要求网格对齐）。list_colors 只在需要查色时调用。颜色只用当前模式的中文名或 MARD 色号。save_image 不覆盖已有文件。",
             )
+    }
+}
+
+fn apply_draw_op(canvas: &mut Canvas, op: &DrawOp) -> Result<usize, CanvasError> {
+    match op {
+        DrawOp::Line {
+            x0,
+            y0,
+            x1,
+            y1,
+            color,
+            brush,
+        } => {
+            let brush = BrushSize::parse(*brush)?;
+            canvas.paint_line(*x0, *y0, *x1, *y1, color, brush)
+        }
+        DrawOp::Rect {
+            x0,
+            y0,
+            x1,
+            y1,
+            color,
+            fill,
+            brush,
+        } => {
+            let brush = BrushSize::parse(*brush)?;
+            canvas.paint_rect(*x0, *y0, *x1, *y1, color, *fill, brush)
+        }
+        DrawOp::Triangle {
+            x0,
+            y0,
+            x1,
+            y1,
+            x2,
+            y2,
+            color,
+            fill,
+            brush,
+        } => {
+            let brush = BrushSize::parse(*brush)?;
+            canvas.paint_triangle(*x0, *y0, *x1, *y1, *x2, *y2, color, *fill, brush)
+        }
+        DrawOp::Circle {
+            cx,
+            cy,
+            radius,
+            color,
+            fill,
+            brush,
+        } => {
+            let brush = BrushSize::parse(*brush)?;
+            canvas.paint_circle(*cx, *cy, *radius, color, *fill, brush)
+        }
+        DrawOp::Ellipse {
+            cx,
+            cy,
+            rx,
+            ry,
+            color,
+            fill,
+            brush,
+        } => {
+            let brush = BrushSize::parse(*brush)?;
+            canvas.paint_ellipse(*cx, *cy, *rx, *ry, color, *fill, brush)
+        }
+        DrawOp::FloodFill { x, y, color } => canvas.flood_fill(*x, *y, color),
+        DrawOp::Pixels { pixels, brush } => {
+            let updates = parse_pixels(pixels)
+                .map_err(|message| CanvasError::InvalidOp { message })?;
+            let brush = BrushSize::parse(*brush)?;
+            canvas.paint(&updates, brush)
+        }
     }
 }
 
@@ -840,6 +1037,85 @@ mod tests {
             .unwrap();
         assert_eq!(result.is_error, Some(true));
         assert_eq!(fs::read(output).unwrap(), b"existing");
+    }
+
+    #[tokio::test]
+    async fn draw_batch_is_atomic_and_ordered() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = PixelDraw::new(dir.path().to_path_buf());
+        create(&server).await;
+
+        let ok = server
+            .draw_batch(Parameters(DrawBatchRequest {
+                ops: vec![
+                    DrawOp::Line {
+                        x0: 0,
+                        y0: 0,
+                        x1: 3,
+                        y1: 0,
+                        color: "黑色".into(),
+                        brush: Some(1),
+                    },
+                    DrawOp::Rect {
+                        x0: 0,
+                        y0: 1,
+                        x1: 3,
+                        y1: 3,
+                        color: "红色".into(),
+                        fill: true,
+                        brush: None,
+                    },
+                ],
+            }))
+            .await
+            .unwrap();
+        assert_ne!(ok.is_error, Some(true));
+        let png = response_png(&ok);
+        let img = image::load_from_memory(&png).unwrap().to_rgb8();
+        assert_eq!(img.get_pixel(0, 0), &image::Rgb([0, 0, 0]));
+        assert_eq!(img.get_pixel(8, 16), &image::Rgb([0xD8, 0x01, 0x27]));
+
+        let before = server
+            .canvas
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .encode_png_8x()
+            .unwrap();
+        let bad = server
+            .draw_batch(Parameters(DrawBatchRequest {
+                ops: vec![
+                    DrawOp::Circle {
+                        cx: 1,
+                        cy: 1,
+                        radius: 1,
+                        color: "黄色".into(),
+                        fill: true,
+                        brush: None,
+                    },
+                    DrawOp::Line {
+                        x0: 0,
+                        y0: 0,
+                        x1: 1,
+                        y1: 1,
+                        color: "彩虹".into(),
+                        brush: Some(1),
+                    },
+                ],
+            }))
+            .await
+            .unwrap();
+        assert_eq!(bad.is_error, Some(true));
+        let after = server
+            .canvas
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .encode_png_8x()
+            .unwrap();
+        assert_eq!(before, after);
     }
 
     #[tokio::test]
