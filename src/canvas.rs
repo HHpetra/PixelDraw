@@ -3,6 +3,7 @@ use std::io::Cursor;
 use image::{DynamicImage, ImageBuffer, ImageFormat, Rgb, imageops::FilterType};
 
 use crate::palette::{self, PaletteMode};
+use crate::shapes;
 
 pub const MAX_SIZE: u32 = 128;
 pub const SCALE: u32 = 8;
@@ -187,6 +188,212 @@ impl Canvas {
             }
         }
         Ok(updates.len() * (n as usize) * (n as usize))
+    }
+
+    /// Stamp a brush-sized square centered on `(x, y)`, clipping at the edges.
+    /// Returns how many pixels were written.
+    fn stamp_centered(&mut self, x: i32, y: i32, rgb: [u8; 3], n: u32) -> usize {
+        let offset = (n as i32) / 2;
+        let left = x - offset;
+        let top = y - offset;
+        let mut written = 0;
+        for dy in 0..n as i32 {
+            for dx in 0..n as i32 {
+                let px = left + dx;
+                let py = top + dy;
+                if px < 0 || py < 0 || px >= self.width as i32 || py >= self.height as i32 {
+                    continue;
+                }
+                let index = (py as u32 * self.width + px as u32) as usize;
+                self.pixels[index] = rgb;
+                written += 1;
+            }
+        }
+        written
+    }
+
+    /// Paint pre-rasterized shape points with a brush stamp on each point.
+    /// Coordinates may fall outside the canvas; those stamps are clipped.
+    pub fn paint_shape_points(
+        &mut self,
+        points: &[(i32, i32)],
+        color: &str,
+        brush: BrushSize,
+    ) -> Result<usize, CanvasError> {
+        let rgb = palette::resolve(self.mode, color).ok_or_else(|| CanvasError::UnknownColor {
+            color: color.to_string(),
+            mode: self.mode,
+        })?;
+        let n = brush.size();
+        let mut written = 0;
+        for &(x, y) in points {
+            written += self.stamp_centered(x, y, rgb, n);
+        }
+        Ok(written)
+    }
+
+    pub fn paint_line(
+        &mut self,
+        x0: u32,
+        y0: u32,
+        x1: u32,
+        y1: u32,
+        color: &str,
+        brush: BrushSize,
+    ) -> Result<usize, CanvasError> {
+        self.require_point(x0, y0)?;
+        self.require_point(x1, y1)?;
+        let points = shapes::line_points(x0 as i32, y0 as i32, x1 as i32, y1 as i32);
+        self.paint_shape_points(&points, color, brush)
+    }
+
+    pub fn paint_rect(
+        &mut self,
+        x0: u32,
+        y0: u32,
+        x1: u32,
+        y1: u32,
+        color: &str,
+        fill: bool,
+        brush: BrushSize,
+    ) -> Result<usize, CanvasError> {
+        self.require_point(x0, y0)?;
+        self.require_point(x1, y1)?;
+        let points = if fill {
+            shapes::rect_fill_points(x0 as i32, y0 as i32, x1 as i32, y1 as i32)
+        } else {
+            shapes::rect_stroke_points(x0 as i32, y0 as i32, x1 as i32, y1 as i32)
+        };
+        // Fills paint the exact region; brush thickness only applies to strokes.
+        let brush = if fill { BrushSize::One } else { brush };
+        self.paint_shape_points(&points, color, brush)
+    }
+
+    pub fn paint_triangle(
+        &mut self,
+        x0: u32,
+        y0: u32,
+        x1: u32,
+        y1: u32,
+        x2: u32,
+        y2: u32,
+        color: &str,
+        fill: bool,
+        brush: BrushSize,
+    ) -> Result<usize, CanvasError> {
+        self.require_point(x0, y0)?;
+        self.require_point(x1, y1)?;
+        self.require_point(x2, y2)?;
+        let points = if fill {
+            shapes::triangle_fill_points(
+                x0 as i32,
+                y0 as i32,
+                x1 as i32,
+                y1 as i32,
+                x2 as i32,
+                y2 as i32,
+            )
+        } else {
+            shapes::triangle_stroke_points(
+                x0 as i32,
+                y0 as i32,
+                x1 as i32,
+                y1 as i32,
+                x2 as i32,
+                y2 as i32,
+            )
+        };
+        let brush = if fill { BrushSize::One } else { brush };
+        self.paint_shape_points(&points, color, brush)
+    }
+
+    pub fn paint_circle(
+        &mut self,
+        cx: u32,
+        cy: u32,
+        radius: u32,
+        color: &str,
+        fill: bool,
+        brush: BrushSize,
+    ) -> Result<usize, CanvasError> {
+        self.require_point(cx, cy)?;
+        let r = radius as i32;
+        let points = if fill {
+            shapes::circle_fill_points(cx as i32, cy as i32, r)
+        } else {
+            shapes::circle_stroke_points(cx as i32, cy as i32, r)
+        };
+        let brush = if fill { BrushSize::One } else { brush };
+        self.paint_shape_points(&points, color, brush)
+    }
+
+    pub fn paint_ellipse(
+        &mut self,
+        cx: u32,
+        cy: u32,
+        rx: u32,
+        ry: u32,
+        color: &str,
+        fill: bool,
+        brush: BrushSize,
+    ) -> Result<usize, CanvasError> {
+        self.require_point(cx, cy)?;
+        let points = if fill {
+            shapes::ellipse_fill_points(cx as i32, cy as i32, rx as i32, ry as i32)
+        } else {
+            shapes::ellipse_stroke_points(cx as i32, cy as i32, rx as i32, ry as i32)
+        };
+        let brush = if fill { BrushSize::One } else { brush };
+        self.paint_shape_points(&points, color, brush)
+    }
+
+    /// 4-connected flood fill replacing the seed color. Returns pixels changed.
+    pub fn flood_fill(&mut self, x: u32, y: u32, color: &str) -> Result<usize, CanvasError> {
+        self.require_point(x, y)?;
+        let rgb = palette::resolve(self.mode, color).ok_or_else(|| CanvasError::UnknownColor {
+            color: color.to_string(),
+            mode: self.mode,
+        })?;
+        let seed_index = (y * self.width + x) as usize;
+        let target = self.pixels[seed_index];
+        if target == rgb {
+            return Ok(0);
+        }
+        let mut stack = vec![(x, y)];
+        let mut written = 0;
+        while let Some((px, py)) = stack.pop() {
+            let index = (py * self.width + px) as usize;
+            if self.pixels[index] != target {
+                continue;
+            }
+            self.pixels[index] = rgb;
+            written += 1;
+            if px > 0 {
+                stack.push((px - 1, py));
+            }
+            if px + 1 < self.width {
+                stack.push((px + 1, py));
+            }
+            if py > 0 {
+                stack.push((px, py - 1));
+            }
+            if py + 1 < self.height {
+                stack.push((px, py + 1));
+            }
+        }
+        Ok(written)
+    }
+
+    fn require_point(&self, x: u32, y: u32) -> Result<(), CanvasError> {
+        if x >= self.width || y >= self.height {
+            return Err(CanvasError::OutOfBounds {
+                x,
+                y,
+                width: self.width,
+                height: self.height,
+            });
+        }
+        Ok(())
     }
 
     pub fn encode_png_8x(&self) -> Result<Vec<u8>, image::ImageError> {
@@ -439,6 +646,97 @@ mod tests {
         ));
         assert!(err.to_string().contains("笔刷 2"));
         assert_eq!(canvas.pixels[0], PaletteMode::Colors221.white_rgb());
+    }
+
+    #[test]
+    fn shape_stroke_uses_brush_thickness_without_alignment() {
+        let mut canvas = Canvas::new(8, 8, PaletteMode::Colors24).unwrap();
+        let written = canvas
+            .paint_line(1, 1, 5, 1, "黑色", BrushSize::Two)
+            .unwrap();
+        assert!(written >= 10);
+        let black = [0, 0, 0];
+        assert_eq!(canvas.pixels[1 * 8 + 1], black);
+        assert_eq!(canvas.pixels[0 * 8 + 1], black);
+        assert_eq!(canvas.pixels[1 * 8 + 2], black);
+    }
+
+    #[test]
+    fn rect_fill_and_stroke_differ() {
+        let mut canvas = Canvas::new(6, 6, PaletteMode::Colors24).unwrap();
+        canvas
+            .paint_rect(1, 1, 3, 3, "红色", true, BrushSize::One)
+            .unwrap();
+        let red = [0xD8, 0x01, 0x27];
+        let white = PaletteMode::Colors24.white_rgb();
+        assert_eq!(canvas.pixels[1 * 6 + 1], red);
+        assert_eq!(canvas.pixels[2 * 6 + 2], red);
+        assert_eq!(canvas.pixels[0], white);
+
+        let mut stroke = Canvas::new(6, 6, PaletteMode::Colors24).unwrap();
+        stroke
+            .paint_rect(1, 1, 3, 3, "黑色", false, BrushSize::One)
+            .unwrap();
+        assert_eq!(stroke.pixels[1 * 6 + 1], [0, 0, 0]);
+        assert_eq!(stroke.pixels[2 * 6 + 2], white);
+        assert_eq!(stroke.pixels[1 * 6 + 3], [0, 0, 0]);
+    }
+
+    #[test]
+    fn triangle_fill_and_stroke_differ() {
+        let mut canvas = Canvas::new(8, 8, PaletteMode::Colors24).unwrap();
+        canvas
+            .paint_triangle(1, 1, 6, 1, 1, 6, "红色", true, BrushSize::One)
+            .unwrap();
+        let red = [0xD8, 0x01, 0x27];
+        let white = PaletteMode::Colors24.white_rgb();
+        assert_eq!(canvas.pixels[1 * 8 + 1], red);
+        assert_eq!(canvas.pixels[2 * 8 + 2], red);
+        assert_eq!(canvas.pixels[7 * 8 + 7], white);
+
+        let mut stroke = Canvas::new(8, 8, PaletteMode::Colors24).unwrap();
+        stroke
+            .paint_triangle(1, 1, 6, 1, 1, 6, "黑色", false, BrushSize::One)
+            .unwrap();
+        assert_eq!(stroke.pixels[1 * 8 + 1], [0, 0, 0]);
+        assert_eq!(stroke.pixels[1 * 8 + 6], [0, 0, 0]);
+        assert_eq!(stroke.pixels[6 * 8 + 1], [0, 0, 0]);
+        assert_eq!(stroke.pixels[3 * 8 + 3], white);
+    }
+
+    #[test]
+    fn circle_and_ellipse_fill_and_flood() {
+        let mut canvas = Canvas::new(9, 9, PaletteMode::Colors24).unwrap();
+        canvas
+            .paint_circle(4, 4, 2, "蓝色", true, BrushSize::One)
+            .unwrap();
+        let blue = [0x10, 0x54, 0xC0];
+        let yellow = [0xFF, 0xE9, 0x53];
+        assert_eq!(canvas.pixels[4 * 9 + 4], blue);
+        canvas.flood_fill(0, 0, "黄色").unwrap();
+        assert_eq!(canvas.pixels[0], yellow);
+        assert_eq!(canvas.pixels[4 * 9 + 4], blue);
+
+        let mut ellipse = Canvas::new(9, 9, PaletteMode::Colors24).unwrap();
+        ellipse
+            .paint_ellipse(4, 4, 3, 1, "黑色", true, BrushSize::One)
+            .unwrap();
+        assert_eq!(ellipse.pixels[4 * 9 + 4], [0, 0, 0]);
+        assert_eq!(ellipse.pixels[4 * 9 + 1], [0, 0, 0]);
+        assert_eq!(
+            ellipse.pixels[0 * 9 + 4],
+            PaletteMode::Colors24.white_rgb()
+        );
+    }
+
+    #[test]
+    fn shape_unknown_color_rejects_whole_op() {
+        let mut canvas = Canvas::new(4, 4, PaletteMode::Colors24).unwrap();
+        let err = canvas
+            .paint_line(0, 0, 3, 3, "彩虹", BrushSize::One)
+            .unwrap_err();
+        assert!(matches!(err, CanvasError::UnknownColor { .. }));
+        assert_eq!(canvas.pixels[0], PaletteMode::Colors24.white_rgb());
     }
 
     #[test]

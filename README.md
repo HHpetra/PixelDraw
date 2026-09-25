@@ -11,16 +11,16 @@ PixelDraw itself needs no API key and exposes no network listener.
 ## What it does
 
 PixelDraw gives an AI assistant a small drawing workspace. You describe what
-to draw in your MCP client; the assistant creates a canvas, queries the
-available colors, places pixels or square brush stamps, inspects the returned
-preview, and continues drawing before saving the result.
+to draw in your MCP client; the assistant creates a canvas and draws with lines,
+rectangles, triangles, circles, ellipses, flood fill or pixel stamps. After each pass it
+reviews the returned preview, keeps adjusting, then saves when satisfied.
 
 - **Precise pixel placement:** draw on a 1..128 pixel-wide and -high canvas
   with explicit coordinates, rather than asking an image model to imitate pixels.
 - **Constrained colors:** choose a locked 24-, 144-, or 221-color MARD palette
   and address colors by code or the palette's Chinese names.
-- **Incremental drawing:** combine aligned 1x1, 2x2, 4x4 and 8x8 brushes across
-  multiple calls. An invalid batch is rejected without partially painting it.
+- **Brush sizes:** aligned 1x1, 2x2, 4x4 and 8x8 stamps, also used as line/stroke
+  width. An invalid batch is rejected without partially painting it.
 - **Immediate previews:** creation and drawing return an 8x nearest-neighbor
   PNG so an image-capable client can display the current canvas.
 - **Local export:** save PNGs to a configurable directory without overwriting
@@ -149,32 +149,44 @@ Ask your client:
 
 > Please use MCP tools to draw a pixel-art seaside sunset. The canvas size should be 32*32.
 
-Minimal tool sequence (arguments shown as JSON):
+Use shape tools or precise pixel stamps as needed. After drawing, review the
+preview and keep adjusting as needed. Minimal tool sequence (arguments shown as JSON):
 
 ```text
-create_canvas {"width":8,"height":8,"palette":"24"}
-list_colors   {}
-draw_pixels   {"pixels":"0 0 C4 4 0 A4 0 4 B5 4 4 F5","brush":4}
+create_canvas {"width":16,"height":16,"palette":"24"}
+draw_circle   {"cx":8,"cy":8,"radius":5,"color":"C4","fill":true}
+draw_rect     {"x0":2,"y0":2,"x1":13,"y1":13,"color":"A4","fill":false,"brush":2}
 save_image    {"filename":"first-icon.png"}
 ```
 
-This produces four colored blocks in a 64x64 PNG. Tool calls return PNG image
-content and text; use an MCP client that can display image tool results.
+This produces a filled circle and a stroked rectangle in a 128x128 PNG. Tool
+calls return PNG image content and text; use an MCP client that can display
+image tool results.
 
 ## Tools and constraints
 
 | Tool | Behavior |
 | --- | --- |
 | `create_canvas` | White canvas, width/height 1..128; locks palette 24, 144 or 221 (default). Successful recreation replaces the old canvas. |
-| `list_colors` | Lists the locked palette, or a requested palette before creation. |
-| `draw_pixels` | Whitespace-separated `x y color` triples; brush 1, 2, 4 or 8. |
+| `list_colors` | Lists the locked palette, or a requested palette before creation. Optional lookup only. |
+| `draw_line` | One-shot line; `brush` is stroke width 1/2/4/8, coordinates need not align to a grid. |
+| `draw_rect` | Rectangle; `fill` selects filled vs stroked, stroke uses `brush` width. |
+| `draw_triangle` | Triangle; `fill` selects filled vs stroked, stroke uses `brush` width. |
+| `draw_circle` | Circle; `fill` selects filled vs stroked, stroke uses `brush` width. |
+| `draw_ellipse` | Ellipse; `fill` selects filled vs stroked, stroke uses `brush` width. |
+| `flood_fill` | Four-connected fill of the seed's current color. |
+| `draw_pixels` | Scatter points / square brush stamps as `x y color` triples. |
 | `save_image` | Saves the current 8x PNG without overwriting existing files. |
 
-- Coordinates start at the top left. Brush positions must be multiples of
-  the brush size, and the entire square must fit inside the canvas.
+- Coordinates start at the top left. Review the preview and keep adjusting. `list_colors` is not a required step.
+- Stroke/line `brush` sizes are 1, 2, 4 or 8, expanded around each raster point.
+  Fills and flood fill ignore brush size.
+- For `draw_pixels`, brush positions must be multiples of the brush size, and
+  the entire square must fit inside the canvas.
 - Invalid drawing batches leave the canvas unchanged. Repeated positions
   are applied in order. Colors use MARD codes or the active palette's Chinese names.
-- Input is limited to 1 MiB and 65,536 brush stamps per drawing call.
+- Circle/ellipse radii may extend past the canvas and are clipped. Line ends,
+  circle centers, and flood-fill seeds must stay inside the canvas.
 - Only one canvas is held in memory per server instance. Restarting loses
   unsaved work. There is no undo, import, session persistence, or native-size export.
 - Images are always enlarged 8x with nearest-neighbor sampling. The 24-color

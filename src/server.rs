@@ -15,7 +15,7 @@ use serde::Deserialize;
 use tempfile::NamedTempFile;
 use tokio::sync::Mutex;
 
-use crate::canvas::{BrushSize, Canvas, PixelUpdate};
+use crate::canvas::{BrushSize, Canvas, CanvasError, PixelUpdate};
 use crate::palette::{self, PaletteMode};
 
 const MAX_PIXEL_BYTES: usize = 1024 * 1024;
@@ -47,6 +47,111 @@ pub struct DrawPixelsRequest {
     /// 笔刷大小：`1`、`2`、`4` 或 `8`，默认 `1`。落点必须对齐到笔刷网格，并一次涂满 size×size 方块。
     #[serde(default)]
     pub brush: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DrawLineRequest {
+    /// 起点 X，必须在图纸范围内
+    pub x0: u32,
+    /// 起点 Y
+    pub y0: u32,
+    /// 终点 X
+    pub x1: u32,
+    /// 终点 Y
+    pub y1: u32,
+    /// 颜色（当前色表的中文名或 MARD 色号）
+    pub color: String,
+    /// 线宽笔刷：1、2、4 或 8，默认 1。按画笔大小加粗，不要求网格对齐。
+    #[serde(default)]
+    pub brush: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DrawRectRequest {
+    /// 对角起点 X（可大于 x1，自动归一化）
+    pub x0: u32,
+    /// 对角起点 Y
+    pub y0: u32,
+    /// 对角终点 X
+    pub x1: u32,
+    /// 对角终点 Y
+    pub y1: u32,
+    /// 颜色
+    pub color: String,
+    /// true 为填充，false 为描边
+    pub fill: bool,
+    /// 描边时的线宽笔刷 1/2/4/8，默认 1；填充时忽略
+    #[serde(default)]
+    pub brush: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DrawTriangleRequest {
+    /// 顶点 A 的 X，必须在图纸内
+    pub x0: u32,
+    /// 顶点 A 的 Y
+    pub y0: u32,
+    /// 顶点 B 的 X
+    pub x1: u32,
+    /// 顶点 B 的 Y
+    pub y1: u32,
+    /// 顶点 C 的 X
+    pub x2: u32,
+    /// 顶点 C 的 Y
+    pub y2: u32,
+    /// 颜色
+    pub color: String,
+    /// true 为填充，false 为描边
+    pub fill: bool,
+    /// 描边线宽笔刷 1/2/4/8，默认 1；填充时忽略
+    #[serde(default)]
+    pub brush: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DrawCircleRequest {
+    /// 圆心 X，必须在图纸范围内；半径可以超出图纸，超出部分裁剪
+    pub cx: u32,
+    /// 圆心 Y
+    pub cy: u32,
+    /// 半径（像素），0 表示单点
+    pub radius: u32,
+    /// 颜色
+    pub color: String,
+    /// true 为填充，false 为描边
+    pub fill: bool,
+    /// 描边线宽笔刷 1/2/4/8，默认 1；填充时忽略
+    #[serde(default)]
+    pub brush: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DrawEllipseRequest {
+    /// 圆心 X
+    pub cx: u32,
+    /// 圆心 Y
+    pub cy: u32,
+    /// 水平半径，0 表示退化为竖线或单点
+    pub rx: u32,
+    /// 垂直半径
+    pub ry: u32,
+    /// 颜色
+    pub color: String,
+    /// true 为填充，false 为描边
+    pub fill: bool,
+    /// 描边线宽笔刷 1/2/4/8，默认 1；填充时忽略
+    #[serde(default)]
+    pub brush: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FloodFillRequest {
+    /// 种子点 X，必须在图纸范围内
+    pub x: u32,
+    /// 种子点 Y
+    pub y: u32,
+    /// 填充颜色；替换与种子点相连的同色区域（四连通）
+    pub color: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -97,11 +202,12 @@ impl PixelDraw {
                 )]));
             }
         };
-        let png = encode_or_internal(&canvas)?;
-        *self.canvas.lock().await = Some(canvas);
+        let mut guard = self.canvas.lock().await;
+        *guard = Some(canvas);
+        let png = encode_or_internal(guard.as_ref().expect("canvas just stored"))?;
         image_result(
             format!(
-                "已创建 {width}x{height} 像素图纸，底色为白色，已锁定 {} 色模式。请用 list_colors 查看可用颜色，用 draw_pixels 按坐标填色。绘制中途不能切换色表。",
+                "已创建 {width}x{height} 像素图纸，底色为白色，已锁定 {} 色模式。直接用 draw_line / draw_rect / draw_triangle / draw_circle / draw_ellipse / flood_fill / draw_pixels 画出图形；需要查色时再 list_colors。画完可查看返回的预览图，再继续修改和调整。绘制中途不能切换色表。",
                 mode.as_str()
             ),
             png,
@@ -135,7 +241,7 @@ impl PixelDraw {
     }
 
     #[tool(
-        description = "在当前像素图纸上按坐标填色，可多次调用以增量绘制。pixels 是一整段字符串，格式为「x y 颜色」三元组，可用空格或换行分隔，例如「0 0 正红\\n0 1 纯黑」。每次最多 1 MiB（1048576 字节）、65536 个落点，超限整批拒绝。可选 brush 为 1、2、4 或 8（默认 1）：在 (x,y) 涂满左上对齐的 N×N 方块，且 x、y 必须是 N 的倍数（笔刷 2 只能落在 0,2,4,6…），不对齐不吸附。坐标 (0,0) 为左上角。颜色必须使用创建时锁定色表中的中文名或 MARD 色号；完整列表请调用 list_colors。格式错误、笔刷非法、未对齐、越界或颜色非法时整批拒绝。返回当前图纸放大 8 倍后的 PNG。"
+        description = "在当前像素图纸上按坐标填色。尽量使用像素绘制；其他工具仅用于大面积绘制。pixels 是一整段字符串，格式为「x y 颜色」三元组，可用空格或换行分隔，例如「0 0 正红\\n0 1 纯黑」。每次最多 1 MiB（1048576 字节）、65536 个落点，超限整批拒绝。可选 brush 为 1、2、4 或 8（默认 1）：在 (x,y) 涂满左上对齐的 N×N 方块，且 x、y 必须是 N 的倍数（笔刷 2 只能落在 0,2,4,6…），不对齐不吸附。坐标 (0,0) 为左上角。颜色必须使用创建时锁定色表中的中文名或 MARD 色号；完整列表请调用 list_colors。格式错误、笔刷非法、未对齐、越界或颜色非法时整批拒绝。返回当前图纸放大 8 倍后的 PNG。"
     )]
     async fn draw_pixels(
         &self,
@@ -174,6 +280,152 @@ impl PixelDraw {
                     format!(
                         "已绘制 {count} 个像素（笔刷 {n}，{stamps} 个落点），当前图纸 {width}x{height}。"
                     ),
+                    png,
+                )
+            }
+            Err(err) => Ok(CallToolResult::error(vec![ContentBlock::text(
+                err.to_string(),
+            )])),
+        }
+    }
+
+    #[tool(
+        description = "画一条直线（Bresenham）。仅用于大面积绘制，细节请尽量用像素绘制。参数为起点 (x0,y0)、终点 (x1,y1) 和颜色；两端点必须在图纸内。可选 brush 为线宽 1、2、4 或 8（默认 1），按画笔大小加粗，坐标不必对齐网格。返回 8 倍放大 PNG，可据预览继续修改和调整。"
+    )]
+    async fn draw_line(
+        &self,
+        Parameters(DrawLineRequest {
+            x0,
+            y0,
+            x1,
+            y1,
+            color,
+            brush,
+        }): Parameters<DrawLineRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.with_canvas(|canvas| {
+            let brush = BrushSize::parse(brush)?;
+            canvas.paint_line(x0, y0, x1, y1, &color, brush)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "画矩形。仅用于大面积绘制，细节请尽量用像素绘制。对角两点 (x0,y0)-(x1,y1) 自动归一化。fill=true 填充整块；fill=false 只描边。描边可用 brush（1/2/4/8，默认 1）控制线宽，坐标不必对齐；填充忽略 brush。两端点必须在图纸内。返回 8 倍放大 PNG，可据预览继续修改和调整。"
+    )]
+    async fn draw_rect(
+        &self,
+        Parameters(DrawRectRequest {
+            x0,
+            y0,
+            x1,
+            y1,
+            color,
+            fill,
+            brush,
+        }): Parameters<DrawRectRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.with_canvas(|canvas| {
+            let brush = BrushSize::parse(brush)?;
+            canvas.paint_rect(x0, y0, x1, y1, &color, fill, brush)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "画三角形。仅用于大面积绘制，细节请尽量用像素绘制。三个顶点 (x0,y0)、(x1,y1)、(x2,y2) 必须在图纸内。fill=true 填充，fill=false 描边。描边可用 brush（1/2/4/8，默认 1）控制线宽，坐标不必对齐；填充忽略 brush。返回 8 倍放大 PNG，可据预览继续修改和调整。"
+    )]
+    async fn draw_triangle(
+        &self,
+        Parameters(DrawTriangleRequest {
+            x0,
+            y0,
+            x1,
+            y1,
+            x2,
+            y2,
+            color,
+            fill,
+            brush,
+        }): Parameters<DrawTriangleRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.with_canvas(|canvas| {
+            let brush = BrushSize::parse(brush)?;
+            canvas.paint_triangle(x0, y0, x1, y1, x2, y2, &color, fill, brush)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "画圆。仅用于大面积绘制，细节请尽量用像素绘制。圆心 (cx,cy) 与半径 radius（0 为单点）；圆心必须在图纸内，半径超出部分自动裁剪。fill=true 填充，fill=false 描边。描边可用 brush（1/2/4/8，默认 1）加粗；填充忽略 brush。返回 8 倍放大 PNG，可据预览继续修改和调整。"
+    )]
+    async fn draw_circle(
+        &self,
+        Parameters(DrawCircleRequest {
+            cx,
+            cy,
+            radius,
+            color,
+            fill,
+            brush,
+        }): Parameters<DrawCircleRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.with_canvas(|canvas| {
+            let brush = BrushSize::parse(brush)?;
+            canvas.paint_circle(cx, cy, radius, &color, fill, brush)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "画椭圆。仅用于大面积绘制，细节请尽量用像素绘制。圆心 (cx,cy)，水平半径 rx、垂直半径 ry（可为 0，退化为线或点）；圆心必须在图纸内，越界部分裁剪。fill=true 填充，fill=false 描边。描边可用 brush（1/2/4/8，默认 1）加粗；填充忽略 brush。返回 8 倍放大 PNG，可据预览继续修改和调整。"
+    )]
+    async fn draw_ellipse(
+        &self,
+        Parameters(DrawEllipseRequest {
+            cx,
+            cy,
+            rx,
+            ry,
+            color,
+            fill,
+            brush,
+        }): Parameters<DrawEllipseRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.with_canvas(|canvas| {
+            let brush = BrushSize::parse(brush)?;
+            canvas.paint_ellipse(cx, cy, rx, ry, &color, fill, brush)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "油漆桶：仅用于大面积填充，细节请尽量用像素绘制。从种子点 (x,y) 四连通填充与该点当前颜色相同的区域，替换为 color。种子点必须在图纸内。若目标色与种子色相同则不改动。返回 8 倍放大 PNG。"
+    )]
+    async fn flood_fill(
+        &self,
+        Parameters(FloodFillRequest { x, y, color }): Parameters<FloodFillRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.with_canvas(|canvas| canvas.flood_fill(x, y, &color)).await
+    }
+
+    async fn with_canvas<F>(&self, op: F) -> Result<CallToolResult, McpError>
+    where
+        F: FnOnce(&mut Canvas) -> Result<usize, CanvasError>,
+    {
+        let mut guard = self.canvas.lock().await;
+        let Some(canvas) = guard.as_mut() else {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(
+                "尚未创建图纸。请先调用 create_canvas。",
+            )]));
+        };
+        match op(canvas) {
+            Ok(count) => {
+                let png = encode_or_internal(canvas)?;
+                let width = canvas.width();
+                let height = canvas.height();
+                image_result(
+                    format!("已绘制 {count} 个像素，当前图纸 {width}x{height}。"),
                     png,
                 )
             }
@@ -236,7 +488,7 @@ impl ServerHandler for PixelDraw {
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(
-                "PixelDraw：用强约束像素指令绘图，不要直接文生图。先 create_canvas(width, height, palette?) 选定 24、144 或 221 色（默认 221，创建后锁定），用 list_colors 查看颜色，再多次 draw_pixels({pixels:\"x y 颜色 ...\", brush?:1|2|4|8})（可用换行；笔刷落点必须对齐网格；每次最多 1 MiB、65536 个落点），完成后用 save_image 将快照原子保存到运行时配置的输出目录，不覆盖已有文件。文件名仅限 ASCII 字母、数字、点、下划线和连字符，禁止路径、空名、尾点及 Windows 设备名，补全 .png 后最多 200 字节；省略时按时间戳命名，重名最多尝试 100 个数字后缀。颜色只用当前模式的中文名或 MARD 色号。绘制与保存都会返回 8 倍放大 PNG。",
+                "PixelDraw：用强约束像素指令绘图，不要直接文生图。尽量使用像素绘制；其他工具（draw_line / draw_rect / draw_triangle / draw_circle / draw_ellipse / flood_fill）仅用于大面积绘制。流程：create_canvas(width, height, palette?) 建图并锁定 24/144/221 色（默认 221）→ 用 draw_pixels 精确描点，大面积可再用图元辅助 → 查看返回的 8 倍预览，继续修改和调整 → 满意后 save_image 保存。矩形、三角形、圆、椭圆用 fill=true|false 区分填充/描边；直线与描边可用 brush=1|2|4|8 控制线宽（不要求网格对齐）。draw_pixels 落点须对齐笔刷网格。list_colors 只在需要查色时调用，不是必经步骤。颜色只用当前模式的中文名或 MARD 色号。save_image 不覆盖已有文件；文件名仅限 ASCII 字母、数字、点、下划线和连字符。",
             )
     }
 }
@@ -588,6 +840,55 @@ mod tests {
             .unwrap();
         assert_eq!(result.is_error, Some(true));
         assert_eq!(fs::read(output).unwrap(), b"existing");
+    }
+
+    #[tokio::test]
+    async fn shape_tools_draw_in_one_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = PixelDraw::new(dir.path().to_path_buf());
+        create(&server).await;
+        let lined = server
+            .draw_line(Parameters(DrawLineRequest {
+                x0: 0,
+                y0: 0,
+                x1: 3,
+                y1: 0,
+                color: "黑色".into(),
+                brush: Some(1),
+            }))
+            .await
+            .unwrap();
+        assert_ne!(lined.is_error, Some(true));
+        let filled = server
+            .draw_rect(Parameters(DrawRectRequest {
+                x0: 0,
+                y0: 1,
+                x1: 3,
+                y1: 3,
+                color: "红色".into(),
+                fill: true,
+                brush: None,
+            }))
+            .await
+            .unwrap();
+        assert_ne!(filled.is_error, Some(true));
+        let png = response_png(&filled);
+        let img = image::load_from_memory(&png).unwrap().to_rgb8();
+        assert_eq!(img.get_pixel(0, 0), &image::Rgb([0, 0, 0]));
+        assert_eq!(img.get_pixel(8, 8), &image::Rgb([0xD8, 0x01, 0x27]));
+
+        let seed = server
+            .flood_fill(Parameters(FloodFillRequest {
+                x: 0,
+                y: 0,
+                color: "黄色".into(),
+            }))
+            .await
+            .unwrap();
+        assert_ne!(seed.is_error, Some(true));
+        let png = response_png(&seed);
+        let img = image::load_from_memory(&png).unwrap().to_rgb8();
+        assert_eq!(img.get_pixel(0, 0), &image::Rgb([0xFF, 0xE9, 0x53]));
     }
 
     #[tokio::test]

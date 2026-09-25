@@ -1,6 +1,7 @@
 mod canvas;
 mod palette;
 mod server;
+mod shapes;
 
 use rmcp::{ServiceExt, transport::stdio};
 use tracing_subscriber::EnvFilter;

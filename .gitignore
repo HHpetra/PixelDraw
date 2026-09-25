@@ -1,6 +1,7 @@
 /target
 /output
 /.opencode/
+/.mimocode/
 /.env
 /.env.*
 *.pem

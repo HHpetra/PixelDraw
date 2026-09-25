@@ -142,7 +142,18 @@ fn stdio_draws_and_saves_outside_the_working_directory() {
     names.sort_unstable();
     assert_eq!(
         names,
-        ["create_canvas", "draw_pixels", "list_colors", "save_image"]
+        [
+            "create_canvas",
+            "draw_circle",
+            "draw_ellipse",
+            "draw_line",
+            "draw_pixels",
+            "draw_rect",
+            "draw_triangle",
+            "flood_fill",
+            "list_colors",
+            "save_image"
+        ]
     );
 
     let created = process.request(
