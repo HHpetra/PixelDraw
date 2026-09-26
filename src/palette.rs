@@ -248,17 +248,15 @@ pub const COLORS_144: &[Color] = colors![
 
 /// Resolve a Chinese name or MARD code against the locked palette only.
 pub fn resolve(mode: PaletteMode, input: &str) -> Option<[u8; 3]> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    mode.colors().iter().find_map(|color| {
-        if color.name == trimmed || color.code.eq_ignore_ascii_case(trimmed) {
-            Some(color.rgb)
-        } else {
-            None
-        }
-    })
+    resolve_color(mode, input).map(|color| color.rgb)
+}
+
+/// Resolve identity as well as RGB; different bead codes may share an RGB value.
+pub fn resolve_color(mode: PaletteMode, input: &str) -> Option<&'static Color> {
+    let input = input.trim();
+    mode.colors()
+        .iter()
+        .find(|color| color.name == input || color.code.eq_ignore_ascii_case(input))
 }
 
 pub fn format_list(mode: PaletteMode) -> String {

@@ -1,6 +1,6 @@
 use std::io::Cursor;
 
-use image::{DynamicImage, ImageBuffer, ImageFormat, Rgb, imageops::FilterType};
+use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba, imageops::FilterType};
 
 use crate::palette::{self, PaletteMode};
 use crate::shapes;
@@ -122,6 +122,7 @@ pub struct Canvas {
     height: u32,
     mode: PaletteMode,
     pixels: Vec<[u8; 3]>,
+    codes: Vec<Option<&'static str>>,
 }
 
 impl Canvas {
@@ -137,7 +138,18 @@ impl Canvas {
             height,
             mode,
             pixels: vec![mode.white_rgb(); len],
+            codes: vec![Some("H2"); len],
         })
+    }
+
+    pub fn new_empty(width: u32, height: u32, mode: PaletteMode) -> Result<Self, CanvasError> {
+        let mut canvas = Self::new(width, height, mode)?;
+        canvas.codes.fill(None);
+        Ok(canvas)
+    }
+
+    pub fn codes(&self) -> &[Option<&'static str>] {
+        &self.codes
     }
 
     pub fn width(&self) -> u32 {
@@ -177,19 +189,26 @@ impl Canvas {
                     height: self.height,
                 });
             }
-            let rgb = palette::resolve(self.mode, &update.color).ok_or_else(|| {
-                CanvasError::UnknownColor {
-                    color: update.color.clone(),
-                    mode: self.mode,
-                }
-            })?;
-            resolved.push((update.x, update.y, rgb));
+            let color = if update.color.trim() == "-" {
+                None
+            } else {
+                Some(
+                    palette::resolve_color(self.mode, &update.color).ok_or_else(|| {
+                        CanvasError::UnknownColor {
+                            color: update.color.clone(),
+                            mode: self.mode,
+                        }
+                    })?,
+                )
+            };
+            resolved.push((update.x, update.y, color));
         }
-        for (x, y, rgb) in resolved {
+        for (x, y, color) in resolved {
             for dy in 0..n {
                 for dx in 0..n {
                     let index = ((y + dy) * self.width + (x + dx)) as usize;
-                    self.pixels[index] = rgb;
+                    self.pixels[index] = color.map_or(self.mode.white_rgb(), |c| c.rgb);
+                    self.codes[index] = color.map(|c| c.code);
                 }
             }
         }
@@ -405,7 +424,8 @@ impl Canvas {
     pub fn encode_png_8x(&self) -> Result<Vec<u8>, image::ImageError> {
         let img = ImageBuffer::from_fn(self.width, self.height, |x, y| {
             let index = (y * self.width + x) as usize;
-            Rgb(self.pixels[index])
+            let [r, g, b] = self.pixels[index];
+            Rgba([r, g, b, if self.codes[index].is_some() { 255 } else { 0 }])
         });
         let scaled = image::imageops::resize(
             &img,
@@ -414,7 +434,7 @@ impl Canvas {
             FilterType::Nearest,
         );
         let mut buf = Vec::new();
-        DynamicImage::ImageRgb8(scaled).write_to(&mut Cursor::new(&mut buf), ImageFormat::Png)?;
+        DynamicImage::ImageRgba8(scaled).write_to(&mut Cursor::new(&mut buf), ImageFormat::Png)?;
         Ok(buf)
     }
 }
@@ -422,6 +442,53 @@ impl Canvas {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::Rgb;
+
+    #[test]
+    fn empty_white_and_canonical_identity_survive_painting() {
+        for mode in [
+            PaletteMode::Colors24,
+            PaletteMode::Colors144,
+            PaletteMode::Colors221,
+        ] {
+            let mut c = Canvas::new_empty(4, 2, mode).unwrap();
+            assert!(c.codes().iter().all(Option::is_none));
+            c.paint(
+                &[stamp(0, 0, "h2"), stamp(1, 0, mode.colors()[0].name)],
+                BrushSize::One,
+            )
+            .unwrap();
+            assert_eq!(c.codes()[0], Some("H2"));
+            assert_eq!(c.codes()[1], Some(mode.colors()[0].code));
+            let rgba = image::load_from_memory(&c.encode_png_8x().unwrap())
+                .unwrap()
+                .to_rgba8();
+            assert_eq!(rgba.get_pixel(0, 0).0[3], 255);
+            assert_eq!(rgba.get_pixel(16, 0).0[3], 0);
+            let before = c.codes().to_vec();
+            assert!(
+                c.paint(&[stamp(0, 0, "-"), stamp(2, 0, "invalid")], BrushSize::One)
+                    .is_err()
+            );
+            assert_eq!(c.codes(), before);
+            c.paint(&[stamp(0, 0, "-")], BrushSize::Two).unwrap();
+            assert!(c.codes()[..2].iter().all(Option::is_none));
+            assert_eq!(c.codes()[4], None);
+        }
+    }
+
+    #[test]
+    fn distinct_codes_are_not_recovered_from_rgb() {
+        let mut c = Canvas::new_empty(128, 2, PaletteMode::Colors221).unwrap();
+        for (i, color) in PaletteMode::Colors221.colors().iter().enumerate() {
+            c.paint(
+                &[stamp(i as u32 % 128, i as u32 / 128, color.code)],
+                BrushSize::One,
+            )
+            .unwrap();
+            assert_eq!(c.codes()[i], Some(color.code));
+        }
+    }
 
     #[test]
     fn rejects_invalid_size() {

@@ -163,21 +163,46 @@ This produces a filled circle and a stroked rectangle in a 128x128 PNG. Tool
 calls return PNG image content and text; use an MCP client that can display
 image tool results.
 
+## Choosing an export
+
+`save_image.output` accepts three values; omitting it preserves the existing pixel-only behavior:
+
+| output | Result with `filename: "cat.png"` |
+| --- | --- |
+| `pixel` (default) | `cat.png`: 8x pixel art, with transparent empty cells |
+| `pattern` | `cat.png`: a labelled bead chart |
+| `both` | `cat.png` and `cat-pattern.png`, with both previews returned in that order |
+
+Charts show a MARD code inside each occupied cell, one-based row/column numbers, heavier lines every five cells, and rectangular color swatches containing only code and count (e.g. `H2 12`). Rendering uses a built-in bitmap font, requiring no Python, system fonts, or network. Charts are PNG only, without SVG/PDF, pagination, or physical 1:1 printing. Drawing coordinates remain zero-based.
+
+```text
+create_canvas {"width":24,"height":24,"palette":"221","background":"empty"}
+draw_pixels   {"pixels":"0 0 H2 1 0 H7 2 0 F5"}
+draw_pixels   {"pixels":"2 0 -"}
+save_image    {"filename":"cat.png","output":"both"}
+```
+
+The default `background: "white"` fills the canvas with H2 beads. `empty` starts without beads. Use `-` to clear cells, with the same brushes and batch validation as painting. H2 always means a real white bead; empty cells have no code label and are excluded from totals. The example uses two beads. No white region is automatically removed as background.
+
+Both exports use the same snapshot with canonical bead codes and occupancy, never RGB-to-code inference. Overlapping strokes count only the final cells.
+
+Each file is saved atomically. `both` checks both names before writing, so existing files cause a refusal without writing. The pair is not a transaction: on a late disk error or concurrent collision, the error lists already saved files. Automatically named pairs retry numeric suffixes for collisions. The derived filename must also fit the 200-byte limit; an overlong name fails before writing.
+
 ## Tools and constraints
 
 | Tool | Behavior |
 | --- | --- |
-| `create_canvas` | White canvas, width/height 1..128; locks palette 24, 144 or 221 (default). Successful recreation replaces the old canvas. |
+| `create_canvas` | Canvas (`background`: `white` default beads or `empty`), width/height 1..128; locks palette 24, 144 or 221 (default). Successful recreation replaces the old canvas. |
 | `list_colors` | Lists the locked palette, or a requested palette before creation. Optional lookup only. |
-| `draw_line` | One-shot line; `brush` is stroke width 1/2/4/8, coordinates need not align to a grid. |
+| `draw_line` | Line; `brush` is stroke width 1/2/4/8, coordinates need not align to a grid. |
 | `draw_rect` | Rectangle; `fill` selects filled vs stroked, stroke uses `brush` width. |
 | `draw_triangle` | Triangle; `fill` selects filled vs stroked, stroke uses `brush` width. |
 | `draw_circle` | Circle; `fill` selects filled vs stroked, stroke uses `brush` width. |
 | `draw_ellipse` | Ellipse; `fill` selects filled vs stroked, stroke uses `brush` width. |
 | `flood_fill` | Four-connected fill of the seed's current color. |
 | `draw_batch` | Ordered atomic batch; any failure rejects the whole batch; one final preview. |
-| `draw_pixels` | Scatter points / square brush stamps as `x y color` triples. |
-| `save_image` | Saves the current 8x PNG without overwriting existing files. |
+| `draw_pixels` | Whitespace-separated `x y color` triples; `-` clears a cell. |
+| `save_image` | Exports `pixel` (default), `pattern`, or `both` as PNG without overwriting existing files. |
 
 - Prefer `draw_batch` for multi-stroke work; do not call drawing tools in parallel. Review the preview and keep adjusting.
 - Stroke/line `brush` sizes are 1, 2, 4 or 8, expanded around each raster point.
@@ -190,7 +215,7 @@ image tool results.
   circle centers, and flood-fill seeds must stay inside the canvas.
 - Only one canvas is held in memory per server instance. Restarting loses
   unsaved work. There is no undo, import, session persistence, or native-size export.
-- Images are always enlarged 8x with nearest-neighbor sampling. The 24-color
+- Pixel previews are enlarged 8x with nearest-neighbor sampling; bead charts have a separate grid layout. The 24-color
   legacy palette differs from larger palettes for some names and RGB values.
 
 ## Output and troubleshooting
