@@ -2,7 +2,7 @@ use std::io::Cursor;
 
 use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba, imageops::FilterType};
 
-use crate::palette::{self, PaletteMode};
+use crate::palette::{self, Color, PaletteMode};
 use crate::shapes;
 
 pub const MAX_SIZE: u32 = 128;
@@ -207,17 +207,22 @@ impl Canvas {
             for dy in 0..n {
                 for dx in 0..n {
                     let index = ((y + dy) * self.width + (x + dx)) as usize;
-                    self.pixels[index] = color.map_or(self.mode.white_rgb(), |c| c.rgb);
-                    self.codes[index] = color.map(|c| c.code);
+                    self.write_cell(index, color);
                 }
             }
         }
         Ok(updates.len() * (n as usize) * (n as usize))
     }
 
+    /// Keep display color, canonical bead code and occupancy in sync.
+    fn write_cell(&mut self, index: usize, color: Option<&Color>) {
+        self.pixels[index] = color.map_or(self.mode.white_rgb(), |c| c.rgb);
+        self.codes[index] = color.map(|c| c.code);
+    }
+
     /// Stamp a brush-sized square centered on `(x, y)`, clipping at the edges.
     /// Returns how many pixels were written.
-    fn stamp_centered(&mut self, x: i32, y: i32, rgb: [u8; 3], n: u32) -> usize {
+    fn stamp_centered(&mut self, x: i32, y: i32, color: &Color, n: u32) -> usize {
         let offset = (n as i32) / 2;
         let left = x - offset;
         let top = y - offset;
@@ -230,7 +235,7 @@ impl Canvas {
                     continue;
                 }
                 let index = (py as u32 * self.width + px as u32) as usize;
-                self.pixels[index] = rgb;
+                self.write_cell(index, Some(color));
                 written += 1;
             }
         }
@@ -245,14 +250,15 @@ impl Canvas {
         color: &str,
         brush: BrushSize,
     ) -> Result<usize, CanvasError> {
-        let rgb = palette::resolve(self.mode, color).ok_or_else(|| CanvasError::UnknownColor {
-            color: color.to_string(),
-            mode: self.mode,
-        })?;
+        let color =
+            palette::resolve_color(self.mode, color).ok_or_else(|| CanvasError::UnknownColor {
+                color: color.to_string(),
+                mode: self.mode,
+            })?;
         let n = brush.size();
         let mut written = 0;
         for &(x, y) in points {
-            written += self.stamp_centered(x, y, rgb, n);
+            written += self.stamp_centered(x, y, color, n);
         }
         Ok(written)
     }
@@ -272,6 +278,7 @@ impl Canvas {
         self.paint_shape_points(&points, color, brush)
     }
 
+    #[allow(clippy::too_many_arguments)] // Coordinates mirror the drawing tool parameters.
     pub fn paint_rect(
         &mut self,
         x0: u32,
@@ -294,6 +301,7 @@ impl Canvas {
         self.paint_shape_points(&points, color, brush)
     }
 
+    #[allow(clippy::too_many_arguments)] // Coordinates mirror the drawing tool parameters.
     pub fn paint_triangle(
         &mut self,
         x0: u32,
@@ -311,21 +319,11 @@ impl Canvas {
         self.require_point(x2, y2)?;
         let points = if fill {
             shapes::triangle_fill_points(
-                x0 as i32,
-                y0 as i32,
-                x1 as i32,
-                y1 as i32,
-                x2 as i32,
-                y2 as i32,
+                x0 as i32, y0 as i32, x1 as i32, y1 as i32, x2 as i32, y2 as i32,
             )
         } else {
             shapes::triangle_stroke_points(
-                x0 as i32,
-                y0 as i32,
-                x1 as i32,
-                y1 as i32,
-                x2 as i32,
-                y2 as i32,
+                x0 as i32, y0 as i32, x1 as i32, y1 as i32, x2 as i32, y2 as i32,
             )
         };
         let brush = if fill { BrushSize::One } else { brush };
@@ -352,6 +350,7 @@ impl Canvas {
         self.paint_shape_points(&points, color, brush)
     }
 
+    #[allow(clippy::too_many_arguments)] // Coordinates mirror the drawing tool parameters.
     pub fn paint_ellipse(
         &mut self,
         cx: u32,
@@ -372,26 +371,28 @@ impl Canvas {
         self.paint_shape_points(&points, color, brush)
     }
 
-    /// 4-connected flood fill replacing the seed color. Returns pixels changed.
+    /// 4-connected flood fill replacing the seed bead code (or empty cells).
+    /// Returns pixels changed; empty cells are distinct from white beads.
     pub fn flood_fill(&mut self, x: u32, y: u32, color: &str) -> Result<usize, CanvasError> {
         self.require_point(x, y)?;
-        let rgb = palette::resolve(self.mode, color).ok_or_else(|| CanvasError::UnknownColor {
-            color: color.to_string(),
-            mode: self.mode,
-        })?;
+        let color =
+            palette::resolve_color(self.mode, color).ok_or_else(|| CanvasError::UnknownColor {
+                color: color.to_string(),
+                mode: self.mode,
+            })?;
         let seed_index = (y * self.width + x) as usize;
-        let target = self.pixels[seed_index];
-        if target == rgb {
+        let target = self.codes[seed_index];
+        if target == Some(color.code) {
             return Ok(0);
         }
         let mut stack = vec![(x, y)];
         let mut written = 0;
         while let Some((px, py)) = stack.pop() {
             let index = (py * self.width + px) as usize;
-            if self.pixels[index] != target {
+            if self.codes[index] != target {
                 continue;
             }
-            self.pixels[index] = rgb;
+            self.write_cell(index, Some(color));
             written += 1;
             if px > 0 {
                 stack.push((px - 1, py));
@@ -443,6 +444,141 @@ impl Canvas {
 mod tests {
     use super::*;
     use image::Rgb;
+
+    // Compare all observable state with the established draw_pixels path.
+    fn assert_drawing_state(draw: impl Fn(&mut Canvas, &str, BrushSize)) {
+        for mode in [
+            PaletteMode::Colors24,
+            PaletteMode::Colors144,
+            PaletteMode::Colors221,
+        ] {
+            let red = palette::resolve_color(mode, "F5").unwrap();
+            for empty in [true, false] {
+                for brush in [
+                    BrushSize::One,
+                    BrushSize::Two,
+                    BrushSize::Four,
+                    BrushSize::Eight,
+                ] {
+                    let mut canvas = if empty {
+                        Canvas::new_empty(9, 9, mode).unwrap()
+                    } else {
+                        Canvas::new(9, 9, mode).unwrap()
+                    };
+                    let mut expected = canvas.clone();
+                    draw(&mut canvas, red.name, brush);
+                    let updates: Vec<_> = canvas
+                        .pixels
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, rgb)| **rgb == red.rgb)
+                        .map(|(i, _)| stamp(i as u32 % 9, i as u32 / 9, "f5"))
+                        .collect();
+                    assert!(!updates.is_empty());
+                    expected.paint(&updates, BrushSize::One).unwrap();
+                    assert_eq!(
+                        canvas.codes(),
+                        expected.codes(),
+                        "{mode:?}, empty={empty}, {brush:?}"
+                    );
+                    assert_eq!(
+                        canvas.encode_png_8x().unwrap(),
+                        expected.encode_png_8x().unwrap()
+                    );
+                    assert_eq!(
+                        crate::pattern::counts(&canvas),
+                        crate::pattern::counts(&expected)
+                    );
+                    assert_eq!(
+                        crate::pattern::encode_png(&canvas).unwrap(),
+                        crate::pattern::encode_png(&expected).unwrap()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn line_keeps_bead_state() {
+        assert_drawing_state(|c, color, brush| {
+            c.paint_line(0, 0, 5, 1, color, brush).unwrap();
+        });
+    }
+
+    #[test]
+    fn rect_keeps_bead_state() {
+        for fill in [false, true] {
+            assert_drawing_state(|c, color, brush| {
+                c.paint_rect(0, 0, 4, 3, color, fill, brush).unwrap();
+            });
+        }
+    }
+
+    #[test]
+    fn triangle_keeps_bead_state() {
+        for fill in [false, true] {
+            assert_drawing_state(|c, color, brush| {
+                c.paint_triangle(0, 0, 4, 0, 0, 4, color, fill, brush)
+                    .unwrap();
+            });
+        }
+    }
+
+    #[test]
+    fn circle_keeps_bead_state() {
+        for fill in [false, true] {
+            assert_drawing_state(|c, color, brush| {
+                c.paint_circle(1, 1, 3, color, fill, brush).unwrap();
+            });
+        }
+    }
+
+    #[test]
+    fn ellipse_keeps_bead_state() {
+        for fill in [false, true] {
+            assert_drawing_state(|c, color, brush| {
+                c.paint_ellipse(1, 1, 3, 2, color, fill, brush).unwrap();
+            });
+        }
+    }
+
+    #[test]
+    fn flood_fill_keeps_bead_state() {
+        assert_drawing_state(|c, color, _| {
+            assert_eq!(c.flood_fill(0, 0, color).unwrap(), 81);
+        });
+    }
+
+    #[test]
+    fn flood_fill_distinguishes_empty_cells_from_white_beads() {
+        for mode in [
+            PaletteMode::Colors24,
+            PaletteMode::Colors144,
+            PaletteMode::Colors221,
+        ] {
+            let mut c = Canvas::new_empty(3, 1, mode).unwrap();
+            c.paint(&[stamp(1, 0, "H2")], BrushSize::One).unwrap();
+            assert_eq!(c.flood_fill(0, 0, "h2").unwrap(), 1);
+            assert_eq!(c.codes(), &[Some("H2"), Some("H2"), None]);
+            assert_eq!(c.flood_fill(0, 0, "H2").unwrap(), 0);
+            assert_eq!(c.flood_fill(1, 0, "F5").unwrap(), 2);
+            assert_eq!(c.codes(), &[Some("F5"), Some("F5"), None]);
+            assert_eq!(c.flood_fill(2, 0, "F5").unwrap(), 1);
+            assert_eq!(crate::pattern::counts(&c).get("F5"), Some(&3));
+        }
+    }
+
+    #[test]
+    fn shape_and_fill_errors_leave_bead_state_unchanged() {
+        let mut c = Canvas::new_empty(4, 4, PaletteMode::Colors221).unwrap();
+        c.paint(&[stamp(0, 0, "F5")], BrushSize::One).unwrap();
+        let before = c.clone();
+        assert!(c.paint_line(0, 0, 3, 3, "invalid", BrushSize::One).is_err());
+        assert!(c.flood_fill(0, 0, "invalid").is_err());
+        assert!(c.flood_fill(4, 0, "H2").is_err());
+        assert_eq!(c.codes(), before.codes());
+        assert_eq!(c.pixels, before.pixels);
+    }
 
     #[test]
     fn empty_white_and_canonical_identity_survive_painting() {
@@ -729,9 +865,9 @@ mod tests {
             .unwrap();
         assert!(written >= 10);
         let black = [0, 0, 0];
-        assert_eq!(canvas.pixels[1 * 8 + 1], black);
-        assert_eq!(canvas.pixels[0 * 8 + 1], black);
-        assert_eq!(canvas.pixels[1 * 8 + 2], black);
+        assert_eq!(canvas.pixels[9], black);
+        assert_eq!(canvas.pixels[1], black);
+        assert_eq!(canvas.pixels[10], black);
     }
 
     #[test]
@@ -742,7 +878,7 @@ mod tests {
             .unwrap();
         let red = [0xD8, 0x01, 0x27];
         let white = PaletteMode::Colors24.white_rgb();
-        assert_eq!(canvas.pixels[1 * 6 + 1], red);
+        assert_eq!(canvas.pixels[7], red);
         assert_eq!(canvas.pixels[2 * 6 + 2], red);
         assert_eq!(canvas.pixels[0], white);
 
@@ -750,9 +886,9 @@ mod tests {
         stroke
             .paint_rect(1, 1, 3, 3, "黑色", false, BrushSize::One)
             .unwrap();
-        assert_eq!(stroke.pixels[1 * 6 + 1], [0, 0, 0]);
+        assert_eq!(stroke.pixels[7], [0, 0, 0]);
         assert_eq!(stroke.pixels[2 * 6 + 2], white);
-        assert_eq!(stroke.pixels[1 * 6 + 3], [0, 0, 0]);
+        assert_eq!(stroke.pixels[9], [0, 0, 0]);
     }
 
     #[test]
@@ -763,7 +899,7 @@ mod tests {
             .unwrap();
         let red = [0xD8, 0x01, 0x27];
         let white = PaletteMode::Colors24.white_rgb();
-        assert_eq!(canvas.pixels[1 * 8 + 1], red);
+        assert_eq!(canvas.pixels[9], red);
         assert_eq!(canvas.pixels[2 * 8 + 2], red);
         assert_eq!(canvas.pixels[7 * 8 + 7], white);
 
@@ -771,8 +907,8 @@ mod tests {
         stroke
             .paint_triangle(1, 1, 6, 1, 1, 6, "黑色", false, BrushSize::One)
             .unwrap();
-        assert_eq!(stroke.pixels[1 * 8 + 1], [0, 0, 0]);
-        assert_eq!(stroke.pixels[1 * 8 + 6], [0, 0, 0]);
+        assert_eq!(stroke.pixels[9], [0, 0, 0]);
+        assert_eq!(stroke.pixels[14], [0, 0, 0]);
         assert_eq!(stroke.pixels[6 * 8 + 1], [0, 0, 0]);
         assert_eq!(stroke.pixels[3 * 8 + 3], white);
     }
@@ -796,10 +932,7 @@ mod tests {
             .unwrap();
         assert_eq!(ellipse.pixels[4 * 9 + 4], [0, 0, 0]);
         assert_eq!(ellipse.pixels[4 * 9 + 1], [0, 0, 0]);
-        assert_eq!(
-            ellipse.pixels[0 * 9 + 4],
-            PaletteMode::Colors24.white_rgb()
-        );
+        assert_eq!(ellipse.pixels[4], PaletteMode::Colors24.white_rgb());
     }
 
     #[test]

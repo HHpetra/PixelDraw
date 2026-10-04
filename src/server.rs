@@ -171,7 +171,7 @@ pub struct FloodFillRequest {
     pub x: u32,
     /// 种子点 Y
     pub y: u32,
-    /// 填充颜色；替换与种子点相连的同色区域（四连通）
+    /// 填充颜色；替换与种子点相连的同色号区域（四连通），空格与白豆分开处理
     pub color: String,
 }
 
@@ -505,13 +505,14 @@ impl PixelDraw {
     }
 
     #[tool(
-        description = "油漆桶：仅用于大面积填充，细节请尽量用像素绘制。从种子点 (x,y) 四连通填充与该点当前颜色相同的区域，替换为 color。种子点必须在图纸内。若目标色与种子色相同则不改动。返回 8 倍放大 PNG。"
+        description = "油漆桶：仅用于大面积填充，细节请尽量用像素绘制。从种子点 (x,y) 四连通填充与该点当前色号相同的区域，替换为 color。空格与 H2 白豆分开处理。种子点必须在图纸内。若目标色号与种子色号相同则不改动。返回 8 倍放大 PNG。"
     )]
     async fn flood_fill(
         &self,
         Parameters(FloodFillRequest { x, y, color }): Parameters<FloodFillRequest>,
     ) -> Result<CallToolResult, McpError> {
-        self.with_canvas(|canvas| canvas.flood_fill(x, y, &color)).await
+        self.with_canvas(|canvas| canvas.flood_fill(x, y, &color))
+            .await
     }
 
     #[tool(
@@ -590,7 +591,6 @@ impl PixelDraw {
 
     #[tool(
         description = "导出当前快照：output 为 pixel（默认，8 倍 PNG）、pattern（带网格、逐格 MARD 色号、矩形色号与数量图例的 PNG）或 both（两者）。空格留白、不计数；H2 是白豆。both 使用 filename 保存像素画，并在扩展名前加 -pattern 保存图纸。每个文件原子保存且不覆盖；多文件并非事务，如遇中途磁盘故障会返回已保存路径。未创建图纸时不可调用。可选 filename（如 cat.png）仅允许 ASCII 字母、数字、点、下划线和连字符；禁止正反斜杠、空名、.、..、尾点及 Windows 设备名（含扩展名），补全 .png 后最多 200 字节。省略则按时间戳命名，重名时最多尝试 100 个数字后缀。保存失败返回工具错误，成功返回保存路径和预览图。"
-
     )]
     async fn save_image(
         &self,
@@ -726,8 +726,8 @@ fn apply_draw_op(canvas: &mut Canvas, op: &DrawOp) -> Result<usize, CanvasError>
         }
         DrawOp::FloodFill { x, y, color } => canvas.flood_fill(*x, *y, color),
         DrawOp::Pixels { pixels, brush } => {
-            let updates = parse_pixels(pixels)
-                .map_err(|message| CanvasError::InvalidOp { message })?;
+            let updates =
+                parse_pixels(pixels).map_err(|message| CanvasError::InvalidOp { message })?;
             let brush = BrushSize::parse(*brush)?;
             canvas.paint(&updates, brush)
         }
@@ -1281,6 +1281,14 @@ mod tests {
             .unwrap()
             .encode_png_8x()
             .unwrap();
+        let before_codes = server
+            .canvas
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .codes()
+            .to_vec();
         let bad = server
             .draw_batch(Parameters(DrawBatchRequest {
                 ops: vec![
@@ -1314,6 +1322,10 @@ mod tests {
             .encode_png_8x()
             .unwrap();
         assert_eq!(before, after);
+        assert_eq!(
+            server.canvas.lock().await.as_ref().unwrap().codes(),
+            before_codes
+        );
     }
 
     #[tokio::test]
