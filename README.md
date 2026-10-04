@@ -199,7 +199,7 @@ Each file is saved atomically. `both` checks both names before writing, so exist
 | `draw_triangle` | Triangle; `fill` selects filled vs stroked, stroke uses `brush` width. |
 | `draw_circle` | Circle; `fill` selects filled vs stroked, stroke uses `brush` width. |
 | `draw_ellipse` | Ellipse; `fill` selects filled vs stroked, stroke uses `brush` width. |
-| `flood_fill` | Four-connected fill of the seed's current color. |
+| `flood_fill` | Four-connected fill of the seed's current bead code; empty cells are distinct from H2 white beads. |
 | `draw_batch` | Ordered atomic batch; any failure rejects the whole batch; one final preview. |
 | `draw_pixels` | Whitespace-separated `x y color` triples; `-` clears a cell. |
 | `save_image` | Exports `pixel` (default), `pattern`, or `both` as PNG without overwriting existing files. |
