@@ -215,8 +215,7 @@ Each file is saved atomically. `both` checks both names before writing, so exist
   circle centers, and flood-fill seeds must stay inside the canvas.
 - Only one canvas is held in memory per server instance. Restarting loses
   unsaved work. There is no undo, import, session persistence, or native-size export.
-- Pixel previews are enlarged 8x with nearest-neighbor sampling; bead charts have a separate grid layout. The 24-color
-  legacy palette differs from larger palettes for some names and RGB values.
+- Pixel previews are enlarged 8x with nearest-neighbor sampling; bead charts have a separate grid layout. A MARD code has the same Chinese name and RGB in the 24-, 144-, and 221-color palettes.
 
 ## Output and troubleshooting
 

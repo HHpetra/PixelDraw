@@ -1112,7 +1112,7 @@ mod tests {
         assert_eq!(canvas.paint(&updates, BrushSize::One).unwrap(), 2);
         let png = canvas.encode_png_8x().unwrap();
         let img = image::load_from_memory(&png).unwrap().to_rgb8();
-        assert_eq!(img.get_pixel(0, 0), &image::Rgb([0xE7, 0x00, 0x2F]));
+        assert_eq!(img.get_pixel(0, 0), &image::Rgb([0xFC, 0x3D, 0x46]));
         assert_eq!(img.get_pixel(8, 16), &image::Rgb([0, 0, 0]));
     }
 
@@ -1123,7 +1123,7 @@ mod tests {
         assert_eq!(canvas.paint(&updates, BrushSize::Two).unwrap(), 8);
         let png = canvas.encode_png_8x().unwrap();
         let img = image::load_from_memory(&png).unwrap().to_rgb8();
-        assert_eq!(img.get_pixel(8, 8), &image::Rgb([0xE7, 0x00, 0x2F]));
+        assert_eq!(img.get_pixel(8, 8), &image::Rgb([0xFC, 0x3D, 0x46]));
         assert_eq!(img.get_pixel(16, 0), &image::Rgb([0, 0, 0]));
         assert_eq!(
             img.get_pixel(32, 0),
@@ -1251,7 +1251,7 @@ mod tests {
                         y0: 0,
                         x1: 3,
                         y1: 0,
-                        color: "黑色".into(),
+                        color: "纯黑".into(),
                         brush: Some(1),
                     },
                     DrawOp::Rect {
@@ -1259,7 +1259,7 @@ mod tests {
                         y0: 1,
                         x1: 3,
                         y1: 3,
-                        color: "红色".into(),
+                        color: "中国红".into(),
                         fill: true,
                         brush: None,
                     },
@@ -1271,7 +1271,7 @@ mod tests {
         let png = response_png(&ok);
         let img = image::load_from_memory(&png).unwrap().to_rgb8();
         assert_eq!(img.get_pixel(0, 0), &image::Rgb([0, 0, 0]));
-        assert_eq!(img.get_pixel(8, 16), &image::Rgb([0xD8, 0x01, 0x27]));
+        assert_eq!(img.get_pixel(8, 16), &image::Rgb([0xE7, 0x00, 0x2F]));
 
         let before = server
             .canvas
@@ -1288,7 +1288,7 @@ mod tests {
                         cx: 1,
                         cy: 1,
                         radius: 1,
-                        color: "黄色".into(),
+                        color: "明黄".into(),
                         fill: true,
                         brush: None,
                     },
@@ -1327,7 +1327,7 @@ mod tests {
                 y0: 0,
                 x1: 3,
                 y1: 0,
-                color: "黑色".into(),
+                color: "纯黑".into(),
                 brush: Some(1),
             }))
             .await
@@ -1339,7 +1339,7 @@ mod tests {
                 y0: 1,
                 x1: 3,
                 y1: 3,
-                color: "红色".into(),
+                color: "中国红".into(),
                 fill: true,
                 brush: None,
             }))
@@ -1349,20 +1349,20 @@ mod tests {
         let png = response_png(&filled);
         let img = image::load_from_memory(&png).unwrap().to_rgb8();
         assert_eq!(img.get_pixel(0, 0), &image::Rgb([0, 0, 0]));
-        assert_eq!(img.get_pixel(8, 8), &image::Rgb([0xD8, 0x01, 0x27]));
+        assert_eq!(img.get_pixel(8, 8), &image::Rgb([0xE7, 0x00, 0x2F]));
 
         let seed = server
             .flood_fill(Parameters(FloodFillRequest {
                 x: 0,
                 y: 0,
-                color: "黄色".into(),
+                color: "明黄".into(),
             }))
             .await
             .unwrap();
         assert_ne!(seed.is_error, Some(true));
         let png = response_png(&seed);
         let img = image::load_from_memory(&png).unwrap().to_rgb8();
-        assert_eq!(img.get_pixel(0, 0), &image::Rgb([0xFF, 0xE9, 0x53]));
+        assert_eq!(img.get_pixel(0, 0), &image::Rgb([0xFB, 0xED, 0x56]));
     }
 
     #[tokio::test]
@@ -1422,7 +1422,7 @@ mod tests {
             ("0 0 F5 1 0 H7".into(), Some(2)),
             ("0 0 F5".into(), Some(3)),
             ("0 0 F5 1".into(), None),
-            ("0 0 正红".into(), None),
+            ("0 0 纯白".into(), None),
             (" ".repeat(MAX_PIXEL_BYTES + 1), None),
             ("0 0 F5 ".repeat(MAX_STAMPS + 1), None),
         ] {

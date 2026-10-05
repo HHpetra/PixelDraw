@@ -518,7 +518,7 @@ mod tests {
                 &[PixelUpdate {
                     x: 1,
                     y: 2,
-                    color: "红色".into(),
+                    color: "中国红".into(),
                 }],
                 BrushSize::One,
             )
@@ -530,7 +530,7 @@ mod tests {
                 &[PixelUpdate {
                     x: 4,
                     y: 0,
-                    color: "黑色".into(),
+                    color: "纯黑".into(),
                 }],
                 BrushSize::One,
             )
@@ -547,7 +547,7 @@ mod tests {
                     PixelUpdate {
                         x: 0,
                         y: 0,
-                        color: "黑色".into(),
+                        color: "纯黑".into(),
                     },
                     PixelUpdate {
                         x: 1,
@@ -580,7 +580,7 @@ mod tests {
                     PixelUpdate {
                         x: 0,
                         y: 0,
-                        color: "黑色".into(),
+                        color: "纯黑".into(),
                     },
                     PixelUpdate {
                         x: 1,
@@ -626,13 +626,13 @@ mod tests {
                 BrushSize::One,
             )
             .unwrap();
-        assert_eq!(canvas.pixels[0], [0xE7, 0x00, 0x2F]);
+        assert_eq!(canvas.pixels[0], [0xFC, 0x3D, 0x46]);
         canvas
             .paint(
                 &[PixelUpdate {
                     x: 1,
                     y: 1,
-                    color: "雪白".into(),
+                    color: "纯白".into(),
                 }],
                 BrushSize::One,
             )
@@ -657,7 +657,7 @@ mod tests {
                 &[PixelUpdate {
                     x: 0,
                     y: 0,
-                    color: "黑色".into(),
+                    color: "纯黑".into(),
                 }],
                 BrushSize::One,
             )
@@ -666,7 +666,7 @@ mod tests {
         let img = image::load_from_memory(&png).unwrap().to_rgb8();
         assert_eq!(img.get_pixel(0, 0), &Rgb([0, 0, 0]));
         assert_eq!(img.get_pixel(7, 7), &Rgb([0, 0, 0]));
-        assert_eq!(img.get_pixel(8, 0), &Rgb([255, 255, 255]));
+        assert_eq!(img.get_pixel(8, 0), &Rgb([254, 255, 255]));
     }
 
     fn stamp(x: u32, y: u32, color: &str) -> PixelUpdate {
@@ -701,7 +701,7 @@ mod tests {
             .paint(&[stamp(0, 0, "正红")], BrushSize::Two)
             .unwrap();
         assert_eq!(written, 4);
-        let red = [0xE7, 0x00, 0x2F];
+        let red = [0xFC, 0x3D, 0x46];
         let white = PaletteMode::Colors221.white_rgb();
         assert_eq!(canvas.pixels[0], red);
         assert_eq!(canvas.pixels[1], red);
@@ -733,7 +733,7 @@ mod tests {
     fn shape_stroke_uses_brush_thickness_without_alignment() {
         let mut canvas = Canvas::new(8, 8, PaletteMode::Colors24).unwrap();
         let written = canvas
-            .paint_line(1, 1, 5, 1, "黑色", BrushSize::Two)
+            .paint_line(1, 1, 5, 1, "纯黑", BrushSize::Two)
             .unwrap();
         assert!(written >= 10);
         let black = [0, 0, 0];
@@ -746,9 +746,9 @@ mod tests {
     fn rect_fill_and_stroke_differ() {
         let mut canvas = Canvas::new(6, 6, PaletteMode::Colors24).unwrap();
         canvas
-            .paint_rect(1, 1, 3, 3, "红色", true, BrushSize::One)
+            .paint_rect(1, 1, 3, 3, "中国红", true, BrushSize::One)
             .unwrap();
-        let red = [0xD8, 0x01, 0x27];
+        let red = [0xE7, 0x00, 0x2F];
         let white = PaletteMode::Colors24.white_rgb();
         assert_eq!(canvas.pixels[1 * 6 + 1], red);
         assert_eq!(canvas.pixels[2 * 6 + 2], red);
@@ -756,7 +756,7 @@ mod tests {
 
         let mut stroke = Canvas::new(6, 6, PaletteMode::Colors24).unwrap();
         stroke
-            .paint_rect(1, 1, 3, 3, "黑色", false, BrushSize::One)
+            .paint_rect(1, 1, 3, 3, "纯黑", false, BrushSize::One)
             .unwrap();
         assert_eq!(stroke.pixels[1 * 6 + 1], [0, 0, 0]);
         assert_eq!(stroke.pixels[2 * 6 + 2], white);
@@ -767,9 +767,9 @@ mod tests {
     fn triangle_fill_and_stroke_differ() {
         let mut canvas = Canvas::new(8, 8, PaletteMode::Colors24).unwrap();
         canvas
-            .paint_triangle(1, 1, 6, 1, 1, 6, "红色", true, BrushSize::One)
+            .paint_triangle(1, 1, 6, 1, 1, 6, "中国红", true, BrushSize::One)
             .unwrap();
-        let red = [0xD8, 0x01, 0x27];
+        let red = [0xE7, 0x00, 0x2F];
         let white = PaletteMode::Colors24.white_rgb();
         assert_eq!(canvas.pixels[1 * 8 + 1], red);
         assert_eq!(canvas.pixels[2 * 8 + 2], red);
@@ -777,7 +777,7 @@ mod tests {
 
         let mut stroke = Canvas::new(8, 8, PaletteMode::Colors24).unwrap();
         stroke
-            .paint_triangle(1, 1, 6, 1, 1, 6, "黑色", false, BrushSize::One)
+            .paint_triangle(1, 1, 6, 1, 1, 6, "纯黑", false, BrushSize::One)
             .unwrap();
         assert_eq!(stroke.pixels[1 * 8 + 1], [0, 0, 0]);
         assert_eq!(stroke.pixels[1 * 8 + 6], [0, 0, 0]);
@@ -789,18 +789,18 @@ mod tests {
     fn circle_and_ellipse_fill_and_flood() {
         let mut canvas = Canvas::new(9, 9, PaletteMode::Colors24).unwrap();
         canvas
-            .paint_circle(4, 4, 2, "蓝色", true, BrushSize::One)
+            .paint_circle(4, 4, 2, "深蓝", true, BrushSize::One)
             .unwrap();
-        let blue = [0x10, 0x54, 0xC0];
-        let yellow = [0xFF, 0xE9, 0x53];
+        let blue = [0x0F, 0x54, 0xC0];
+        let yellow = [0xFB, 0xED, 0x56];
         assert_eq!(canvas.pixels[4 * 9 + 4], blue);
-        canvas.flood_fill(0, 0, "黄色").unwrap();
+        canvas.flood_fill(0, 0, "明黄").unwrap();
         assert_eq!(canvas.pixels[0], yellow);
         assert_eq!(canvas.pixels[4 * 9 + 4], blue);
 
         let mut ellipse = Canvas::new(9, 9, PaletteMode::Colors24).unwrap();
         ellipse
-            .paint_ellipse(4, 4, 3, 1, "黑色", true, BrushSize::One)
+            .paint_ellipse(4, 4, 3, 1, "纯黑", true, BrushSize::One)
             .unwrap();
         assert_eq!(ellipse.pixels[4 * 9 + 4], [0, 0, 0]);
         assert_eq!(ellipse.pixels[4 * 9 + 1], [0, 0, 0]);

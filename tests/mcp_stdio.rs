@@ -167,7 +167,7 @@ fn stdio_draws_and_saves_outside_the_working_directory() {
     let blank = image::load_from_memory(&response_png(&created))
         .unwrap()
         .to_rgb8();
-    assert!(blank.pixels().all(|pixel| pixel.0 == [255, 255, 255]));
+    assert!(blank.pixels().all(|pixel| pixel.0 == [254, 255, 255]));
 
     let drawn = process.request(
         4,
@@ -180,10 +180,10 @@ fn stdio_draws_and_saves_outside_the_working_directory() {
     let painted_png = response_png(&drawn);
     let painted = image::load_from_memory(&painted_png).unwrap().to_rgb8();
     let colors = [
-        [0x42, 0xCC, 0xFF],
-        [0xFF, 0xE9, 0x53],
-        [0x00, 0xBD, 0x35],
-        [0xD8, 0x01, 0x27],
+        [0x41, 0xCC, 0xFF],
+        [0xFB, 0xED, 0x56],
+        [0x35, 0xE3, 0x52],
+        [0xE7, 0x00, 0x2F],
     ];
     for (x, y, pixel) in painted.enumerate_pixels() {
         assert_eq!(
