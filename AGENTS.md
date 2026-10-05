@@ -20,7 +20,7 @@
    - `draw_batch({ ops })` 多笔有序批量；`ops` 项用 `type` 区分 line/rect/triangle/circle/ellipse/flood_fill/pixels
 3. `list_colors` 只在需要查色时调用，**不是**作画必经步骤。
 4. 每次绘制工具都会返回当前图纸放大 8 倍（最近邻）后的 PNG；画完可以出图看看效果，再继续修改和调整。
-5. 完成后调用 `save_image({ filename?, output?: "pixel" | "pattern" | "both" })`。默认 `pixel` 为 8 倍像素画；`pattern` 为拼豆图纸（逐格色号 + 图例）；`both` 同时导出（第二张文件名加 `-pattern`）。空格留白不计数，H2 是白豆。保存到 `--output-dir` 目录，不覆盖已有文件；只接受文件名，不接受路径。
+5. 完成后调用 `save_image({ filename?, output?: "pixel" | "pattern" | "both" })`。默认 `pixel` 为 8 倍像素画；`pattern` 为拼豆图纸（四边序号、逐格色号、自中心每 10 格计数线、色号与数量图例）；`both` 同时导出（第二张文件名加 `-pattern`）。空格留白不计数，H2 是白豆。保存到 `--output-dir` 目录，不覆盖已有文件；只接受文件名，不接受路径。
 
 像素画与图纸共用规范化色号和占用信息。每个文件独立原子保存；`both` 非多文件事务，中途失败会列出已保存文件。
 

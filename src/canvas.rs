@@ -313,21 +313,11 @@ impl Canvas {
         self.require_point(x2, y2)?;
         let points = if fill {
             shapes::triangle_fill_points(
-                x0 as i32,
-                y0 as i32,
-                x1 as i32,
-                y1 as i32,
-                x2 as i32,
-                y2 as i32,
+                x0 as i32, y0 as i32, x1 as i32, y1 as i32, x2 as i32, y2 as i32,
             )
         } else {
             shapes::triangle_stroke_points(
-                x0 as i32,
-                y0 as i32,
-                x1 as i32,
-                y1 as i32,
-                x2 as i32,
-                y2 as i32,
+                x0 as i32, y0 as i32, x1 as i32, y1 as i32, x2 as i32, y2 as i32,
             )
         };
         let brush = if fill { BrushSize::One } else { brush };
@@ -485,7 +475,8 @@ mod tests {
     #[test]
     fn shapes_and_flood_record_codes_on_empty_canvas() {
         let mut c = Canvas::new_empty(4, 4, PaletteMode::Colors221).unwrap();
-        c.paint_rect(0, 0, 1, 1, "H7", true, BrushSize::One).unwrap();
+        c.paint_rect(0, 0, 1, 1, "H7", true, BrushSize::One)
+            .unwrap();
         assert_eq!(c.codes()[0], Some("H7"));
         assert_eq!(c.codes()[5], Some("H7"));
         c.flood_fill(3, 3, "H2").unwrap();
@@ -813,10 +804,7 @@ mod tests {
             .unwrap();
         assert_eq!(ellipse.pixels[4 * 9 + 4], [0, 0, 0]);
         assert_eq!(ellipse.pixels[4 * 9 + 1], [0, 0, 0]);
-        assert_eq!(
-            ellipse.pixels[0 * 9 + 4],
-            PaletteMode::Colors24.white_rgb()
-        );
+        assert_eq!(ellipse.pixels[0 * 9 + 4], PaletteMode::Colors24.white_rgb());
     }
 
     #[test]

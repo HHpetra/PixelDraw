@@ -14,6 +14,17 @@ This records the maintainer's confirmation, not independent legal verification
 or a claim that the upstream chart is MIT-licensed. The code license does not
 grant rights to upstream chart artwork, trademarks, or reference photographs.
 
+## Pattern sheet font and mark
+
+`assets/SheetFont.ttf` is a SimHei subset used only to draw pattern-sheet
+labels: Latin letters, digits, and the Chinese phrases on the chart. The file
+comes from the local pixel-downsample pattern sheet. SimHei is not covered by
+this repository's MIT license.
+
+`assets/xiaohongshu-logo.png` is the Xiaohongshu mark shown beside 豆图工坊 on
+pattern sheets, copied from the same local project. It is a third-party
+trademark and is not covered by this repository's MIT license.
+
 ## Dependencies and images
 
 Rust dependencies retain their own licenses; exact versions are in Cargo.lock.

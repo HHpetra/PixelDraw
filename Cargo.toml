@@ -10,6 +10,7 @@ rust-version = "1.96"
 
 [dependencies]
 base64 = "0.22"
+fontdue = "0.9"
 image = { version = "0.25", default-features = false, features = ["png"] }
 rmcp = { version = "3.1", features = ["server", "transport-io", "schemars"] }
 schemars = "1"
