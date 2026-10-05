@@ -217,7 +217,7 @@ impl Canvas {
 
     /// Stamp a brush-sized square centered on `(x, y)`, clipping at the edges.
     /// Returns how many pixels were written.
-    fn stamp_centered(&mut self, x: i32, y: i32, rgb: [u8; 3], n: u32) -> usize {
+    fn stamp_centered(&mut self, x: i32, y: i32, color: &'static palette::Color, n: u32) -> usize {
         let offset = (n as i32) / 2;
         let left = x - offset;
         let top = y - offset;
@@ -230,7 +230,8 @@ impl Canvas {
                     continue;
                 }
                 let index = (py as u32 * self.width + px as u32) as usize;
-                self.pixels[index] = rgb;
+                self.pixels[index] = color.rgb;
+                self.codes[index] = Some(color.code);
                 written += 1;
             }
         }
@@ -245,14 +246,15 @@ impl Canvas {
         color: &str,
         brush: BrushSize,
     ) -> Result<usize, CanvasError> {
-        let rgb = palette::resolve(self.mode, color).ok_or_else(|| CanvasError::UnknownColor {
-            color: color.to_string(),
-            mode: self.mode,
-        })?;
+        let resolved =
+            palette::resolve_color(self.mode, color).ok_or_else(|| CanvasError::UnknownColor {
+                color: color.to_string(),
+                mode: self.mode,
+            })?;
         let n = brush.size();
         let mut written = 0;
         for &(x, y) in points {
-            written += self.stamp_centered(x, y, rgb, n);
+            written += self.stamp_centered(x, y, resolved, n);
         }
         Ok(written)
     }
@@ -375,23 +377,26 @@ impl Canvas {
     /// 4-connected flood fill replacing the seed color. Returns pixels changed.
     pub fn flood_fill(&mut self, x: u32, y: u32, color: &str) -> Result<usize, CanvasError> {
         self.require_point(x, y)?;
-        let rgb = palette::resolve(self.mode, color).ok_or_else(|| CanvasError::UnknownColor {
-            color: color.to_string(),
-            mode: self.mode,
-        })?;
+        let resolved =
+            palette::resolve_color(self.mode, color).ok_or_else(|| CanvasError::UnknownColor {
+                color: color.to_string(),
+                mode: self.mode,
+            })?;
         let seed_index = (y * self.width + x) as usize;
-        let target = self.pixels[seed_index];
-        if target == rgb {
+        // Compare by bead code: empty cells and H2 share the same RGB.
+        let target = self.codes[seed_index];
+        if target == Some(resolved.code) {
             return Ok(0);
         }
         let mut stack = vec![(x, y)];
         let mut written = 0;
         while let Some((px, py)) = stack.pop() {
             let index = (py * self.width + px) as usize;
-            if self.pixels[index] != target {
+            if self.codes[index] != target {
                 continue;
             }
-            self.pixels[index] = rgb;
+            self.pixels[index] = resolved.rgb;
+            self.codes[index] = Some(resolved.code);
             written += 1;
             if px > 0 {
                 stack.push((px - 1, py));
@@ -475,6 +480,18 @@ mod tests {
             assert!(c.codes()[..2].iter().all(Option::is_none));
             assert_eq!(c.codes()[4], None);
         }
+    }
+
+    #[test]
+    fn shapes_and_flood_record_codes_on_empty_canvas() {
+        let mut c = Canvas::new_empty(4, 4, PaletteMode::Colors221).unwrap();
+        c.paint_rect(0, 0, 1, 1, "H7", true, BrushSize::One).unwrap();
+        assert_eq!(c.codes()[0], Some("H7"));
+        assert_eq!(c.codes()[5], Some("H7"));
+        c.flood_fill(3, 3, "H2").unwrap();
+        assert_eq!(c.codes()[15], Some("H2"));
+        assert_eq!(c.codes()[0], Some("H7"));
+        assert!(c.codes().iter().all(Option::is_some));
     }
 
     #[test]
