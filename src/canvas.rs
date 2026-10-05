@@ -68,6 +68,7 @@ pub enum CanvasError {
     InvalidOp {
         message: String,
     },
+    EmptyUndo,
 }
 
 impl std::fmt::Display for CanvasError {
@@ -110,11 +111,23 @@ impl std::fmt::Display for CanvasError {
             Self::InvalidOp { message } => {
                 write!(f, "{message}")
             }
+            Self::EmptyUndo => {
+                write!(f, "没有可撤回的绘制步骤。")
+            }
         }
     }
 }
 
 impl std::error::Error for CanvasError {}
+
+/// Maximum number of undo snapshots kept per canvas.
+pub const MAX_UNDO: usize = 64;
+
+#[derive(Debug, Clone)]
+struct Snapshot {
+    pixels: Vec<[u8; 3]>,
+    codes: Vec<Option<&'static str>>,
+}
 
 #[derive(Debug, Clone)]
 pub struct Canvas {
@@ -123,6 +136,7 @@ pub struct Canvas {
     mode: PaletteMode,
     pixels: Vec<[u8; 3]>,
     codes: Vec<Option<&'static str>>,
+    undo: Vec<Snapshot>,
 }
 
 impl Canvas {
@@ -139,6 +153,7 @@ impl Canvas {
             mode,
             pixels: vec![mode.white_rgb(); len],
             codes: vec![Some("H2"); len],
+            undo: Vec::new(),
         })
     }
 
@@ -162,6 +177,52 @@ impl Canvas {
 
     pub fn mode(&self) -> PaletteMode {
         self.mode
+    }
+
+    fn push_undo(&mut self) {
+        self.undo.push(Snapshot {
+            pixels: self.pixels.clone(),
+            codes: self.codes.clone(),
+        });
+        if self.undo.len() > MAX_UNDO {
+            self.undo.remove(0);
+        }
+    }
+
+    /// Number of undo steps currently available.
+    pub fn undo_len(&self) -> usize {
+        self.undo.len()
+    }
+
+    /// Mark the current undo depth so a multi-op tool can collapse into one step.
+    pub fn undo_mark(&self) -> usize {
+        self.undo.len()
+    }
+
+    /// Collapse undo entries added after `mark` into a single step that restores
+    /// the pre-call state. No-op when at most one entry was added.
+    pub fn collapse_undo_to(&mut self, mark: usize) {
+        if self.undo.len() > mark + 1 {
+            let oldest = self.undo[mark].clone();
+            self.undo.truncate(mark);
+            self.undo.push(oldest);
+        }
+    }
+
+    /// Restore the previous canvas state. Returns remaining undo steps.
+    pub fn undo(&mut self, steps: usize) -> Result<usize, CanvasError> {
+        if self.undo.is_empty() {
+            return Err(CanvasError::EmptyUndo);
+        }
+        let steps = steps.min(self.undo.len());
+        for _ in 0..steps {
+            let Some(snap) = self.undo.pop() else {
+                break;
+            };
+            self.pixels = snap.pixels;
+            self.codes = snap.codes;
+        }
+        Ok(self.undo.len())
     }
 
     /// Validate the whole batch, then paint. Any invalid stamp rejects everything.
@@ -203,6 +264,10 @@ impl Canvas {
             };
             resolved.push((update.x, update.y, color));
         }
+        if resolved.is_empty() {
+            return Ok(0);
+        }
+        self.push_undo();
         for (x, y, color) in resolved {
             for dy in 0..n {
                 for dx in 0..n {
@@ -240,6 +305,7 @@ impl Canvas {
 
     /// Paint pre-rasterized shape points with a brush stamp on each point.
     /// Coordinates may fall outside the canvas; those stamps are clipped.
+    /// Records one undo step when at least one point is supplied.
     pub fn paint_shape_points(
         &mut self,
         points: &[(i32, i32)],
@@ -251,6 +317,10 @@ impl Canvas {
                 color: color.to_string(),
                 mode: self.mode,
             })?;
+        if points.is_empty() {
+            return Ok(0);
+        }
+        self.push_undo();
         let n = brush.size();
         let mut written = 0;
         for &(x, y) in points {
@@ -364,6 +434,54 @@ impl Canvas {
         self.paint_shape_points(&points, color, brush)
     }
 
+    /// Smooth curve through waypoints:
+    /// 2 points draw a line, 3 points a quadratic Bezier, 4 points a cubic Bezier,
+    /// and 5+ points a Catmull-Rom spline through every waypoint.
+    pub fn paint_curve(
+        &mut self,
+        points: &[(u32, u32)],
+        color: &str,
+        brush: BrushSize,
+    ) -> Result<usize, CanvasError> {
+        if points.len() < 2 {
+            return Err(CanvasError::InvalidOp {
+                message: "曲线至少需要 2 个路径点。".into(),
+            });
+        }
+        for &(x, y) in points {
+            self.require_point(x, y)?;
+        }
+        let raster: Vec<(i32, i32)> = match points.len() {
+            2 => shapes::line_points(
+                points[0].0 as i32,
+                points[0].1 as i32,
+                points[1].0 as i32,
+                points[1].1 as i32,
+            ),
+            3 => shapes::quadratic_bezier_points(
+                points[0].0 as i32,
+                points[0].1 as i32,
+                points[1].0 as i32,
+                points[1].1 as i32,
+                points[2].0 as i32,
+                points[2].1 as i32,
+            ),
+            4 => shapes::cubic_bezier_points(
+                (points[0].0 as i32, points[0].1 as i32),
+                (points[1].0 as i32, points[1].1 as i32),
+                (points[2].0 as i32, points[2].1 as i32),
+                (points[3].0 as i32, points[3].1 as i32),
+            ),
+            _ => shapes::catmull_rom_points(
+                &points
+                    .iter()
+                    .map(|&(x, y)| (x as i32, y as i32))
+                    .collect::<Vec<_>>(),
+            ),
+        };
+        self.paint_shape_points(&raster, color, brush)
+    }
+
     /// 4-connected flood fill replacing the seed color. Returns pixels changed.
     pub fn flood_fill(&mut self, x: u32, y: u32, color: &str) -> Result<usize, CanvasError> {
         self.require_point(x, y)?;
@@ -378,6 +496,7 @@ impl Canvas {
         if target == Some(resolved.code) {
             return Ok(0);
         }
+        self.push_undo();
         let mut stack = vec![(x, y)];
         let mut written = 0;
         while let Some((px, py)) = stack.pop() {
@@ -675,6 +794,75 @@ mod tests {
             y,
             color: color.into(),
         }
+    }
+
+    #[test]
+    fn undo_restores_previous_states() {
+        let mut canvas = Canvas::new(4, 4, PaletteMode::Colors221).unwrap();
+        assert_eq!(canvas.undo_len(), 0);
+        assert!(matches!(canvas.undo(1), Err(CanvasError::EmptyUndo)));
+
+        canvas.paint(&[stamp(0, 0, "正红")], BrushSize::One).unwrap();
+        canvas.paint(&[stamp(1, 0, "纯黑")], BrushSize::One).unwrap();
+        assert_eq!(canvas.undo_len(), 2);
+        assert_eq!(canvas.codes()[0], Some("F2"));
+        assert_eq!(canvas.codes()[1], Some("H7"));
+
+        let remaining = canvas.undo(1).unwrap();
+        assert_eq!(remaining, 1);
+        assert_eq!(canvas.codes()[0], Some("F2"));
+        assert_eq!(canvas.codes()[1], Some("H2"));
+        canvas.undo(1).unwrap();
+        assert_eq!(canvas.codes()[0], Some("H2"));
+        assert!(matches!(canvas.undo(1), Err(CanvasError::EmptyUndo)));
+    }
+
+    #[test]
+    fn undo_caps_history_and_collapse_merges_batch() {
+        let mut canvas = Canvas::new(16, 16, PaletteMode::Colors221).unwrap();
+        for i in 0..(MAX_UNDO + 5) {
+            let x = (i % 16) as u32;
+            let y = ((i / 16) % 16) as u32;
+            canvas
+                .paint(&[stamp(x, y, "正红")], BrushSize::One)
+                .unwrap();
+        }
+        assert_eq!(canvas.undo_len(), MAX_UNDO);
+
+        let mut batch = Canvas::new(8, 8, PaletteMode::Colors221).unwrap();
+        let mark = batch.undo_mark();
+        batch.paint(&[stamp(0, 0, "正红")], BrushSize::One).unwrap();
+        batch.paint(&[stamp(1, 0, "纯黑")], BrushSize::One).unwrap();
+        batch.paint(&[stamp(2, 0, "明黄")], BrushSize::One).unwrap();
+        assert_eq!(batch.undo_len(), 3);
+        batch.collapse_undo_to(mark);
+        assert_eq!(batch.undo_len(), 1);
+        batch.undo(1).unwrap();
+        assert_eq!(batch.codes()[0], Some("H2"));
+        assert_eq!(batch.codes()[1], Some("H2"));
+        assert_eq!(batch.codes()[2], Some("H2"));
+    }
+
+    #[test]
+    fn curve_paints_through_control_points() {
+        let mut canvas = Canvas::new(16, 16, PaletteMode::Colors24).unwrap();
+        let written = canvas
+            .paint_curve(&[(0, 8), (4, 0), (8, 8), (12, 0)], "纯黑", BrushSize::One)
+            .unwrap();
+        assert!(written > 10);
+        // Cubic Bezier: start P0 (0,8), end P1 (12,0).
+        assert_eq!(canvas.codes()[8 * 16], Some("H7"));
+        assert_eq!(canvas.codes()[12], Some("H7"));
+        assert!(canvas.undo_len() == 1);
+
+        let err = canvas
+            .paint_curve(&[(0, 0)], "纯黑", BrushSize::One)
+            .unwrap_err();
+        assert!(matches!(err, CanvasError::InvalidOp { .. }));
+        let err = canvas
+            .paint_curve(&[(0, 0), (99, 0)], "纯黑", BrushSize::One)
+            .unwrap_err();
+        assert!(matches!(err, CanvasError::OutOfBounds { .. }));
     }
 
     #[test]

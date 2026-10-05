@@ -15,11 +15,12 @@
    - `draw_triangle({ x0, y0, x1, y1, x2, y2, color, fill, brush? })` 三角形；`fill` 同上
    - `draw_circle({ cx, cy, radius, color, fill, brush? })` 圆；`fill` 同上
    - `draw_ellipse({ cx, cy, rx, ry, color, fill, brush? })` 椭圆；`fill` 同上
+   - `draw_curve({ points: [[x,y], ...], color, brush? })` 曲线；2 点直线、3 点二次贝塞尔、4 点三次贝塞尔、≥5 点过点平滑样条（Catmull-Rom）
    - `flood_fill({ x, y, color })` 油漆桶，四连通替换种子点同色区域
    - `draw_pixels({ pixels: "0 0 正红 0 1 纯黑", brush? })` 散点/方块笔刷落点；用 `-` 清除为空格（不是 H2 白豆）
-   - `draw_batch({ ops })` 多笔有序批量；`ops` 项用 `type` 区分 line/rect/triangle/circle/ellipse/flood_fill/pixels
+   - `draw_batch({ ops })` 多笔有序批量；`ops` 项用 `type` 区分 line/rect/triangle/circle/ellipse/curve/flood_fill/pixels
 3. `list_colors` 只在需要查色时调用，**不是**作画必经步骤。
-4. 每次绘制工具都会返回当前图纸放大 8 倍（最近邻）后的 PNG；画完可以出图看看效果，再继续修改和调整。
+4. 每次绘制工具都会返回当前图纸放大 8 倍（最近邻）后的 PNG；画完可以出图看看效果，再继续修改和调整。画错可用 `undo({ steps? })` 撤回；每次成功的绘制调用记一步，`draw_batch` 整批记一步，`create_canvas` 会清空历史。
 5. 完成后调用 `save_image({ filename?, output?: "pixel" | "pattern" | "both" })`。默认 `pixel` 为 8 倍像素画；`pattern` 为拼豆图纸（四边序号、逐格色号、自中心每 10 格计数线、色号与数量图例）；`both` 同时导出（第二张文件名加 `-pattern`）。空格留白不计数，H2 是白豆。保存到 `--output-dir` 目录，不覆盖已有文件；只接受文件名，不接受路径。
 
 像素画与图纸共用规范化色号和占用信息。每个文件独立原子保存；`both` 非多文件事务，中途失败会列出已保存文件。
@@ -27,11 +28,11 @@
 坐标系：`(0, 0)` 为左上角，`x` 向右，`y` 向下。
 
 **画笔大小 `brush`** 只能是 `1`、`2`、`4`、`8`，**默认 `1`**：
-- 对 `draw_line` 与描边模式的矩形/圆/椭圆：表示线宽，坐标**不必**对齐网格，以落点为中心扩展 `N×N`。
+- 对 `draw_line`、`draw_curve` 与描边模式的矩形/圆/椭圆：表示线宽，坐标**不必**对齐网格，以落点为中心扩展 `N×N`。
 - 对 `draw_pixels`：在落点 `(x, y)` 涂满左上对齐的 `N×N` 方块，且 `x`、`y` 必须是 `N` 的倍数（不吸附）。例如 `brush: 2` 只能落在 `0,2,4,6…`。
 - 填充模式与 `flood_fill` 忽略 `brush`。
 
-颜色非法时整批拒绝。图元端点/圆心/种子点越界报错；圆/椭圆半径可超出图纸，超出部分自动裁剪。`draw_pixels` 笔刷未对齐或方块出界时整批拒绝。
+颜色非法时整批拒绝。图元端点/圆心/曲线路径点/种子点越界报错；圆/椭圆半径可超出图纸，超出部分自动裁剪。`draw_pixels` 笔刷未对齐或方块出界时整批拒绝。
 
 ## 24 色表
 

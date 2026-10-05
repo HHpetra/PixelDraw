@@ -12,17 +12,19 @@ PixelDraw itself needs no API key and exposes no network listener.
 
 PixelDraw gives an AI assistant a small drawing workspace. You describe what
 to draw in your MCP client; the assistant creates a canvas and draws with lines,
-rectangles, triangles, circles, ellipses, flood fill or pixel stamps. After each pass it
-reviews the returned preview, keeps adjusting, then saves when satisfied.
+rectangles, triangles, circles, ellipses, curves, flood fill or pixel stamps. After each pass it
+reviews the returned preview, keeps adjusting (undo is available), then saves when satisfied.
 
 - **Precise pixel placement:** draw on a 1..128 pixel-wide and -high canvas
   with explicit coordinates, rather than asking an image model to imitate pixels.
 - **Constrained colors:** choose a locked 24-, 144-, or 221-color MARD palette
   and address colors by code or the palette's Chinese names.
-- **Brush sizes:** aligned 1x1, 2x2, 4x4 and 8x8 stamps, also used as line/stroke
+- **Brush sizes:** aligned 1x1, 2x2, 4x4 and 8x8 stamps, also used as line/curve/stroke
   width. An invalid batch is rejected without partially painting it.
 - **Immediate previews:** creation and drawing return an 8x nearest-neighbor
   PNG so an image-capable client can display the current canvas.
+- **Undo and curves:** reverse recent strokes with `undo`, and draw quadratic /
+  cubic Bezier or smooth multi-point curves with `draw_curve`.
 - **Local export:** save PNGs to a configurable directory without overwriting
   existing work. The model and its API billing remain the client's responsibility.
 
@@ -199,9 +201,11 @@ Each file is saved atomically. `both` checks both names before writing, so exist
 | `draw_triangle` | Triangle; `fill` selects filled vs stroked, stroke uses `brush` width. |
 | `draw_circle` | Circle; `fill` selects filled vs stroked, stroke uses `brush` width. |
 | `draw_ellipse` | Ellipse; `fill` selects filled vs stroked, stroke uses `brush` width. |
+| `draw_curve` | Curve through `[x,y]` points: 2=line, 3=quadratic Bezier, 4=cubic Bezier, 5+=Catmull-Rom through every point. |
 | `flood_fill` | Four-connected fill of the seed's current color. |
-| `draw_batch` | Ordered atomic batch; any failure rejects the whole batch; one final preview. |
+| `draw_batch` | Ordered atomic batch; any failure rejects the whole batch; one final preview and one undo step. |
 | `draw_pixels` | Whitespace-separated `x y color` triples; `-` clears a cell. |
+| `undo` | Reverses recent drawing steps (`steps` optional, default 1). Successful draws are one step each; `draw_batch` is one step; `create_canvas` clears history. |
 | `save_image` | Exports `pixel` (default), `pattern`, or `both` as PNG without overwriting existing files. |
 
 - Prefer `draw_batch` for multi-stroke work; do not call drawing tools in parallel. Review the preview and keep adjusting.
@@ -212,9 +216,10 @@ Each file is saved atomically. `both` checks both names before writing, so exist
 - Invalid drawing batches leave the canvas unchanged. Repeated positions
   are applied in order. Colors use MARD codes or the active palette's Chinese names.
 - Circle/ellipse radii may extend past the canvas and are clipped. Line ends,
-  circle centers, and flood-fill seeds must stay inside the canvas.
+  curve points, circle centers, and flood-fill seeds must stay inside the canvas.
 - Only one canvas is held in memory per server instance. Restarting loses
-  unsaved work. There is no undo, import, session persistence, or native-size export.
+  unsaved work. Undo is in-memory only (up to 64 steps) and is cleared by
+  `create_canvas`. There is no import, session persistence, or native-size export.
 - Pixel previews are enlarged 8x with nearest-neighbor sampling; bead charts have a separate grid layout. A MARD code has the same Chinese name and RGB in the 24-, 144-, and 221-color palettes.
 
 ## Output and troubleshooting

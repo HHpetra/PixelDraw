@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0
+
+- `draw_curve`: quadratic/cubic Bezier and Catmull-Rom smooth curves through waypoints.
+- `undo`: reverse recent drawing steps; `draw_batch` collapses to a single undo step.
+- Docs and tool instructions cover curves and undo.
+
 ## 0.1.1
 
 - Prebuilt Windows x64, Linux x64, macOS ARM64 and macOS x64 archives.

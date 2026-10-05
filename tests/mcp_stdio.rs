@@ -146,6 +146,7 @@ fn stdio_draws_and_saves_outside_the_working_directory() {
             "create_canvas",
             "draw_batch",
             "draw_circle",
+            "draw_curve",
             "draw_ellipse",
             "draw_line",
             "draw_pixels",
@@ -153,7 +154,8 @@ fn stdio_draws_and_saves_outside_the_working_directory() {
             "draw_triangle",
             "flood_fill",
             "list_colors",
-            "save_image"
+            "save_image",
+            "undo"
         ]
     );
 
