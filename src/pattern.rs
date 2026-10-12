@@ -516,6 +516,21 @@ mod tests {
     }
 
     #[test]
+    fn shape_codes_drive_chart_counts_not_just_rgb() {
+        // Issue #3: primitives used to leave codes as H2/empty, so charts were wrong.
+        let mut white = Canvas::new(8, 8, PaletteMode::Colors221).unwrap();
+        white.paint_line(0, 0, 7, 0, "F5", BrushSize::One).unwrap();
+        assert_eq!(counts(&white), BTreeMap::from([("F5", 8), ("H2", 56)]));
+
+        let mut empty = Canvas::new_empty(8, 8, PaletteMode::Colors221).unwrap();
+        empty.paint_line(0, 0, 7, 0, "F5", BrushSize::One).unwrap();
+        assert_eq!(counts(&empty), BTreeMap::from([("F5", 8)]));
+
+        empty.flood_fill(0, 1, "H2").unwrap();
+        assert_eq!(counts(&empty), BTreeMap::from([("F5", 8), ("H2", 56)]));
+    }
+
+    #[test]
     fn chart_counts_final_beads_and_leaves_empty_cells_unlabelled() {
         let mut c = Canvas::new_empty(3, 1, PaletteMode::Colors221).unwrap();
         c.paint(

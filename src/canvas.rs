@@ -605,6 +605,40 @@ mod tests {
     }
 
     #[test]
+    fn flood_fill_distinguishes_empty_cells_from_white_beads() {
+        // Empty cells and H2 share the same RGB; fill must use bead codes.
+        let mut empty = Canvas::new_empty(2, 1, PaletteMode::Colors221).unwrap();
+        assert_eq!(empty.flood_fill(0, 0, "H2").unwrap(), 2);
+        assert_eq!(empty.codes(), [Some("H2"), Some("H2")]);
+
+        let mut single = Canvas::new_empty(1, 1, PaletteMode::Colors221).unwrap();
+        assert_eq!(single.flood_fill(0, 0, "H2").unwrap(), 1);
+        assert_eq!(single.codes()[0], Some("H2"));
+
+        let mut white = Canvas::new(1, 1, PaletteMode::Colors221).unwrap();
+        assert_eq!(white.flood_fill(0, 0, "H2").unwrap(), 0);
+        assert_eq!(white.codes()[0], Some("H2"));
+
+        let mut mixed = Canvas::new(3, 1, PaletteMode::Colors221).unwrap();
+        mixed.paint(&[stamp(0, 0, "-")], BrushSize::One).unwrap();
+        // Seed on empty should not cross into the white bead next door.
+        assert_eq!(mixed.flood_fill(0, 0, "F5").unwrap(), 1);
+        assert_eq!(mixed.codes(), [Some("F5"), Some("H2"), Some("H2")]);
+    }
+
+    #[test]
+    fn shapes_sync_codes_for_pattern_on_white_canvas() {
+        let mut c = Canvas::new(8, 8, PaletteMode::Colors221).unwrap();
+        let written = c.paint_line(0, 0, 7, 0, "F5", BrushSize::One).unwrap();
+        assert_eq!(written, 8);
+        assert_eq!(c.codes()[..8], [Some("F5"); 8][..]);
+        assert_eq!(c.codes()[8], Some("H2"));
+        let f5 = c.codes().iter().filter(|code| **code == Some("F5")).count();
+        let h2 = c.codes().iter().filter(|code| **code == Some("H2")).count();
+        assert_eq!((f5, h2), (8, 56));
+    }
+
+    #[test]
     fn distinct_codes_are_not_recovered_from_rgb() {
         let mut c = Canvas::new_empty(128, 2, PaletteMode::Colors221).unwrap();
         for (i, color) in PaletteMode::Colors221.colors().iter().enumerate() {
