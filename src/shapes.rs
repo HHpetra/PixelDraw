@@ -148,17 +148,32 @@ pub fn ellipse_stroke_points(cx: i32, cy: i32, rx: i32, ry: i32) -> Vec<(i32, i3
 }
 
 fn edge(ax: i32, ay: i32, bx: i32, by: i32, px: i32, py: i32) -> i64 {
-    (bx as i64 - ax as i64) * (py as i64 - ay as i64) - (by as i64 - ay as i64) * (px as i64 - ax as i64)
+    (bx as i64 - ax as i64) * (py as i64 - ay as i64)
+        - (by as i64 - ay as i64) * (px as i64 - ax as i64)
 }
 
-pub fn triangle_stroke_points(x0: i32, y0: i32, x1: i32, y1: i32, x2: i32, y2: i32) -> Vec<(i32, i32)> {
+pub fn triangle_stroke_points(
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    x2: i32,
+    y2: i32,
+) -> Vec<(i32, i32)> {
     let mut points = line_points(x0, y0, x1, y1);
     points.extend(line_points(x1, y1, x2, y2));
     points.extend(line_points(x2, y2, x0, y0));
     points
 }
 
-pub fn triangle_fill_points(x0: i32, y0: i32, x1: i32, y1: i32, x2: i32, y2: i32) -> Vec<(i32, i32)> {
+pub fn triangle_fill_points(
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    x2: i32,
+    y2: i32,
+) -> Vec<(i32, i32)> {
     let area = edge(x0, y0, x1, y1, x2, y2);
     if area == 0 {
         return triangle_stroke_points(x0, y0, x1, y1, x2, y2);
@@ -215,7 +230,10 @@ mod tests {
 
     #[test]
     fn line_is_bresenham() {
-        assert_eq!(line_points(0, 0, 3, 0), vec![(0, 0), (1, 0), (2, 0), (3, 0)]);
+        assert_eq!(
+            line_points(0, 0, 3, 0),
+            vec![(0, 0), (1, 0), (2, 0), (3, 0)]
+        );
         assert_eq!(line_points(0, 0, 0, 2), vec![(0, 0), (0, 1), (0, 2)]);
         assert_eq!(line_points(1, 1, 1, 1), vec![(1, 1)]);
         let diag = line_points(0, 0, 2, 2);

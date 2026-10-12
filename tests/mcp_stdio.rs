@@ -300,3 +300,85 @@ fn stdio_exports_both_with_empty_background_and_clear() {
     let chart = image::open(output.path().join("test-pattern.png")).unwrap();
     assert!(chart.width() > pixels.width());
 }
+
+#[test]
+fn stdio_shapes_and_fill_export_the_same_state_as_pixels() {
+    let output = tempfile::tempdir().unwrap();
+    let mut process = Process::spawn(
+        output.path(),
+        &[
+            std::ffi::OsStr::new("--output-dir"),
+            output.path().as_os_str(),
+        ],
+    );
+    process.request(1, "initialize", json!({"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"drawing-state-test","version":"1"}}));
+    process.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+    let mut id = 1;
+    let mut call = |name: &str, arguments: Value| {
+        id += 1;
+        let result = process.request(id, "tools/call", json!({"name":name,"arguments":arguments}));
+        assert_ne!(result["isError"], true, "{result}");
+        result
+    };
+    for background in ["white", "empty"] {
+        for batch in [false, true] {
+            call(
+                "create_canvas",
+                json!({"width":8,"height":8,"background":background}),
+            );
+            let ops = vec![
+                json!({"type":"line","x0":0,"y0":0,"x1":7,"y1":0,"color":"f5"}),
+                json!({"type":"rect","x0":0,"y0":1,"x1":3,"y1":3,"color":"H7","fill":true}),
+                json!({"type":"flood_fill","x":7,"y":7,"color":"A4"}),
+                json!({"type":"pixels","pixels":"0 0 -"}),
+            ];
+            let preview = if batch {
+                call("draw_batch", json!({"ops":ops}))
+            } else {
+                let mut result = Value::Null;
+                for (mut op, name) in
+                    ops.into_iter()
+                        .zip(["draw_line", "draw_rect", "flood_fill", "draw_pixels"])
+                {
+                    op.as_object_mut().unwrap().remove("type");
+                    result = call(name, op);
+                }
+                result
+            };
+            let name = format!("{background}-{batch}");
+            call("save_image", json!({"filename":name,"output":"both"}));
+            call(
+                "create_canvas",
+                json!({"width":8,"height":8,"background":background}),
+            );
+            let pixels = (0..8)
+                .flat_map(|y| {
+                    (0..8).map(move |x| {
+                        let color = if x == 0 && y == 0 {
+                            "-"
+                        } else if y == 0 {
+                            "F5"
+                        } else if x < 4 && y <= 3 {
+                            "H7"
+                        } else {
+                            "A4"
+                        };
+                        format!("{x} {y} {color}")
+                    })
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            let expected = call("draw_pixels", json!({"pixels":pixels}));
+            assert_eq!(response_png(&preview), response_png(&expected));
+            let control = format!("{name}-control");
+            call("save_image", json!({"filename":control,"output":"both"}));
+            for suffix in [".png", "-pattern.png"] {
+                assert_eq!(
+                    std::fs::read(output.path().join(format!("{name}{suffix}"))).unwrap(),
+                    std::fs::read(output.path().join(format!("{control}{suffix}"))).unwrap(),
+                    "{background}, batch={batch}, {suffix}"
+                );
+            }
+        }
+    }
+}

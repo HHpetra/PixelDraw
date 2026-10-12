@@ -168,7 +168,7 @@ save_image    {"filename":"cat.png","output":"both"}
 | `draw_triangle` | 三角形；`fill` 区分填充/描边，描边可用 `brush` 加粗。 |
 | `draw_circle` | 圆；`fill` 区分填充/描边，描边可用 `brush` 加粗。 |
 | `draw_ellipse` | 椭圆；`fill` 区分填充/描边，描边可用 `brush` 加粗。 |
-| `flood_fill` | 油漆桶，四连通替换种子点同色区域。 |
+| `flood_fill` | 油漆桶，四连通替换种子点同色号区域；空格与 H2 白豆分开处理。 |
 | `draw_batch` | 多笔有序批量，原子执行；任一步失败整批拒绝，只回最终预览。 |
 | `draw_pixels` | 散点/方块笔刷落点：`x y 颜色` 三元组；`-` 清除为空格。 |
 | `save_image` | `output`: pixel（默认像素画）、pattern（拼豆图纸）、both（两者），均为 PNG，不覆盖文件。 |
