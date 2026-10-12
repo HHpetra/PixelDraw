@@ -202,7 +202,7 @@ Each file is saved atomically. `both` checks both names before writing, so exist
 | `draw_circle` | Circle; `fill` selects filled vs stroked, stroke uses `brush` width. |
 | `draw_ellipse` | Ellipse; `fill` selects filled vs stroked, stroke uses `brush` width. |
 | `draw_curve` | Curve through `[x,y]` points: 2=line, 3=quadratic Bezier, 4=cubic Bezier, 5+=Catmull-Rom through every point. |
-| `flood_fill` | Four-connected fill of the seed's current color. |
+| `flood_fill` | Four-connected fill of the seed's current bead code; empty cells are distinct from H2 white beads. |
 | `draw_batch` | Ordered atomic batch; any failure rejects the whole batch; one final preview and one undo step. |
 | `draw_pixels` | Whitespace-separated `x y color` triples; `-` clears a cell. |
 | `undo` | Reverses recent drawing steps (`steps` optional, default 1). Successful draws are one step each; `draw_batch` is one step; `create_canvas` clears history. |

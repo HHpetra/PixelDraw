@@ -171,7 +171,7 @@ save_image    {"filename":"cat.png","output":"both"}
 | `draw_circle` | 圆；`fill` 区分填充/描边，描边可用 `brush` 加粗。 |
 | `draw_ellipse` | 椭圆；`fill` 区分填充/描边，描边可用 `brush` 加粗。 |
 | `draw_curve` | 曲线：`points` 为 `[x,y]` 列表；2 点直线、3 点二次贝塞尔、4 点三次贝塞尔、≥5 点过点平滑样条。 |
-| `flood_fill` | 油漆桶，四连通替换种子点同色区域。 |
+| `flood_fill` | 油漆桶，四连通替换种子点同色号区域；空格与 H2 白豆分开处理。 |
 | `draw_batch` | 多笔有序批量，原子执行；任一步失败整批拒绝，只回最终预览；成功整批只记一次 undo。 |
 | `draw_pixels` | 散点/方块笔刷落点：`x y 颜色` 三元组；`-` 清除为空格。 |
 | `undo` | 撤回绘制步骤（`steps` 可选，默认 1）。每次成功绘制记一步，`draw_batch` 整批记一步；`create_canvas` 清空历史。 |

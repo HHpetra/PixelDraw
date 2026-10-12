@@ -16,7 +16,7 @@
    - `draw_circle({ cx, cy, radius, color, fill, brush? })` 圆；`fill` 同上
    - `draw_ellipse({ cx, cy, rx, ry, color, fill, brush? })` 椭圆；`fill` 同上
    - `draw_curve({ points: [[x,y], ...], color, brush? })` 曲线；2 点直线、3 点二次贝塞尔、4 点三次贝塞尔、≥5 点过点平滑样条（Catmull-Rom）
-   - `flood_fill({ x, y, color })` 油漆桶，四连通替换种子点同色区域
+   - `flood_fill({ x, y, color })` 油漆桶，四连通替换种子点同色号区域；空格与 H2 白豆分开处理
    - `draw_pixels({ pixels: "0 0 正红 0 1 纯黑", brush? })` 散点/方块笔刷落点；用 `-` 清除为空格（不是 H2 白豆）
    - `draw_batch({ ops })` 多笔有序批量；`ops` 项用 `type` 区分 line/rect/triangle/circle/ellipse/curve/flood_fill/pixels
 3. `list_colors` 只在需要查色时调用，**不是**作画必经步骤。

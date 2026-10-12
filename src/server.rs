@@ -190,7 +190,7 @@ pub struct FloodFillRequest {
     pub x: u32,
     /// 种子点 Y
     pub y: u32,
-    /// 填充颜色；替换与种子点相连的同色区域（四连通）
+    /// 填充颜色；替换与种子点相连的同色号区域（四连通），空格与白豆分开处理
     pub color: String,
 }
 
@@ -588,7 +588,7 @@ impl PixelDraw {
     }
 
     #[tool(
-        description = "油漆桶：仅用于大面积填充，细节请尽量用像素绘制。从种子点 (x,y) 四连通填充与该点当前颜色相同的区域，替换为 color。种子点必须在图纸内。若目标色与种子色相同则不改动。返回 8 倍放大 PNG。"
+        description = "油漆桶：仅用于大面积填充，细节请尽量用像素绘制。从种子点 (x,y) 四连通填充与该点当前色号相同的区域，替换为 color。空格与 H2 白豆分开处理。种子点必须在图纸内。若目标色号与种子色号相同则不改动。返回 8 倍放大 PNG。"
     )]
     async fn flood_fill(
         &self,
@@ -1375,6 +1375,14 @@ mod tests {
             .unwrap()
             .encode_png_8x()
             .unwrap();
+        let before_codes = server
+            .canvas
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .codes()
+            .to_vec();
         let bad = server
             .draw_batch(Parameters(DrawBatchRequest {
                 ops: vec![
@@ -1408,6 +1416,10 @@ mod tests {
             .encode_png_8x()
             .unwrap();
         assert_eq!(before, after);
+        assert_eq!(
+            server.canvas.lock().await.as_ref().unwrap().codes(),
+            before_codes
+        );
     }
 
     #[tokio::test]
@@ -1479,12 +1491,18 @@ mod tests {
         let painted_png = response_png(&painted);
         assert_ne!(painted_png, blank);
 
-        let undone = server.undo(Parameters(UndoRequest { steps: None })).await.unwrap();
+        let undone = server
+            .undo(Parameters(UndoRequest { steps: None }))
+            .await
+            .unwrap();
         assert_ne!(undone.is_error, Some(true));
         assert_eq!(response_png(&undone), blank);
         assert_eq!(server.canvas.lock().await.as_ref().unwrap().undo_len(), 0);
 
-        let again = server.undo(Parameters(UndoRequest { steps: Some(1) })).await.unwrap();
+        let again = server
+            .undo(Parameters(UndoRequest { steps: Some(1) }))
+            .await
+            .unwrap();
         assert_eq!(again.is_error, Some(true));
 
         server
@@ -1512,7 +1530,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(server.canvas.lock().await.as_ref().unwrap().undo_len(), 1);
-        let undone = server.undo(Parameters(UndoRequest { steps: None })).await.unwrap();
+        let undone = server
+            .undo(Parameters(UndoRequest { steps: None }))
+            .await
+            .unwrap();
         assert_eq!(response_png(&undone), blank);
     }
 
@@ -1546,7 +1567,10 @@ mod tests {
             .unwrap();
         assert_eq!(bad.is_error, Some(true));
 
-        let undone = server.undo(Parameters(UndoRequest { steps: None })).await.unwrap();
+        let undone = server
+            .undo(Parameters(UndoRequest { steps: None }))
+            .await
+            .unwrap();
         assert_eq!(response_png(&undone), blank);
     }
 
