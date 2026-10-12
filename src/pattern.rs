@@ -20,11 +20,24 @@ const INK_RGB: [u8; 3] = [0x2A, 0x21, 0x18];
 const MAJOR_LINE_RGB: [u8; 3] = [0x00, 0x00, 0x00];
 const MAJOR_LINE_EVERY: u32 = 10;
 const MAJOR_LINE_W: u32 = 2;
-const MAX_SHEET_SIDE: u32 = 4096;
+/// Hard cap for the exported sheet (both sides). Xiaohongshu auto-compresses
+/// anything larger and the bead codes become unreadable after downscale.
+const MAX_SHEET_SIDE: u32 = 2048;
 const LUMINANCE_THRESHOLD: f32 = 140.0;
 const HEADER_H: u32 = 44;
 const BRAND_NAME: &str = "豆图工坊";
 const BRAND_GAP: f32 = 8.0;
+/// Bead-code font size as a fraction of cell edge. Large enough that codes
+/// stay legible after the sheet is scaled down for social apps.
+const CODE_PX_RATIO: f32 = 0.58;
+const CODE_PX_MAX: f32 = 28.0;
+/// Keep drawn text inside this fraction of the cell so codes do not clip.
+const CODE_FIT: f32 = 0.94;
+/// Outer ring row/column numbers — same weight as bead codes so they stay
+/// readable after platform downscale.
+const INDEX_PX_RATIO: f32 = 0.58;
+const INDEX_PX_MAX: f32 = 28.0;
+const LEGEND_PX_RATIO: f32 = 0.36;
 
 pub fn counts(canvas: &Canvas) -> BTreeMap<&'static str, usize> {
     let mut counts = BTreeMap::new();
@@ -40,11 +53,21 @@ pub fn encode_png(canvas: &Canvas) -> Result<Vec<u8>, image::ImageError> {
     let mut glyphs = GlyphCache::default();
     let grid_w = canvas.width();
     let grid_h = canvas.height();
-    let cell = resolve_cell_size(grid_w, grid_h);
-    let grid_px_w = (grid_w + 2) * cell;
-    let grid_px_h = (grid_h + 2) * cell;
-    let pad = cell.max(16);
-    let header_gap = pad / 2;
+    let used: Vec<_> = canvas
+        .mode()
+        .colors()
+        .iter()
+        .filter(|color| counts.contains_key(color.code))
+        .collect();
+    let cell = resolve_cell_size(grid_w, grid_h, used.len());
+    let layout = plan_layout(grid_w, grid_h, cell, used.len());
+    let grid_px_w = layout.grid_px_w;
+    let grid_px_h = layout.grid_px_h;
+    let pad = layout.pad;
+    let header_gap = layout.header_gap;
+    let legend_gap = layout.gap;
+    let swatch = layout.swatch;
+    let section_gap = layout.section_gap;
 
     let ui_px = (HEADER_H as f32 * 0.42).clamp(12.0, 22.0);
     let brand_px = (HEADER_H as f32 * 0.48).clamp(14.0, 24.0);
@@ -64,16 +87,8 @@ pub fn encode_png(canvas: &Canvas) -> Result<Vec<u8>, image::ImageError> {
             + measure_text(font, BRAND_NAME, brand_px))
         .ceil() as u32,
     );
-
-    let legend_gap = (cell / 4).max(6);
-    let swatch = (cell * 2).clamp(36, 64);
+    // Legend spans the full content width (header may be wider than the grid).
     let per_row = ((content_w + legend_gap) / (swatch + legend_gap)).max(1);
-    let used: Vec<_> = canvas
-        .mode()
-        .colors()
-        .iter()
-        .filter(|color| counts.contains_key(color.code))
-        .collect();
     let legend_rows = if used.is_empty() {
         0
     } else {
@@ -84,7 +99,6 @@ pub fn encode_png(canvas: &Canvas) -> Result<Vec<u8>, image::ImageError> {
     } else {
         pad + legend_rows * (swatch + legend_gap) - legend_gap + pad
     };
-    let section_gap = if legend_rows == 0 { 0 } else { pad };
     let sheet_w = content_w + pad * 2;
     let sheet_h = pad + HEADER_H + header_gap + grid_px_h + section_gap + legend_block_h + pad;
 
@@ -102,8 +116,8 @@ pub fn encode_png(canvas: &Canvas) -> Result<Vec<u8>, image::ImageError> {
         content_w,
     );
 
-    let code_px = (cell as f32 * 0.38).clamp(8.0, 18.0);
-    let index_px = (cell as f32 * 0.32).clamp(7.0, 14.0);
+    let index_px = (cell as f32 * INDEX_PX_RATIO).clamp(8.0, INDEX_PX_MAX);
+    let index_fit = (cell as f32 * CODE_FIT).max(8.0);
     for gy in 0..(grid_h + 2) {
         for gx in 0..(grid_w + 2) {
             let x0 = origin_x + gx * cell;
@@ -121,6 +135,13 @@ pub fn encode_png(canvas: &Canvas) -> Result<Vec<u8>, image::ImageError> {
                     None
                 };
                 if let Some(text) = label {
+                    let mut ix = index_px;
+                    let w = measure_text(font, &text, ix);
+                    if w > index_fit && w > 0.0 {
+                        ix *= index_fit / w;
+                    }
+                    let ix = ix.max(8.0);
+                    // Match bead-code weight: second pass thickens strokes.
                     draw_text_centered(
                         &mut image,
                         font,
@@ -128,7 +149,17 @@ pub fn encode_png(canvas: &Canvas) -> Result<Vec<u8>, image::ImageError> {
                         &text,
                         cx,
                         cy,
-                        index_px,
+                        ix,
+                        [255, 255, 255],
+                    );
+                    draw_text_centered(
+                        &mut image,
+                        font,
+                        &mut glyphs,
+                        &text,
+                        cx + 0.45,
+                        cy,
+                        ix,
                         [255, 255, 255],
                     );
                 }
@@ -145,15 +176,20 @@ pub fn encode_png(canvas: &Canvas) -> Result<Vec<u8>, image::ImageError> {
                 .unwrap_or(PAGE_RGB);
             fill_rect(&mut image, x0, y0, x0 + cell, y0 + cell, fill);
             if let Some(code) = code {
+                let code_px = fit_code_px(font, code, cell);
+                let ink = contrast_text_rgb(fill);
+                // Second pass at +0.45px thickens strokes so codes survive
+                // platform downscale (XHS compress) without going muddy.
+                draw_text_centered(&mut image, font, &mut glyphs, code, cx, cy, code_px, ink);
                 draw_text_centered(
                     &mut image,
                     font,
                     &mut glyphs,
                     code,
-                    cx,
+                    cx + 0.45,
                     cy,
                     code_px,
-                    contrast_text_rgb(fill),
+                    ink,
                 );
             }
         }
@@ -186,7 +222,7 @@ pub fn encode_png(canvas: &Canvas) -> Result<Vec<u8>, image::ImageError> {
 
     if !used.is_empty() {
         let legend_top = origin_y + grid_px_h + section_gap;
-        let swatch_px = (swatch as f32 * 0.28).clamp(9.0, 16.0);
+        let swatch_px = (swatch as f32 * LEGEND_PX_RATIO).clamp(9.0, 22.0);
         let line_gap = swatch_px * 1.15;
         for (i, color) in used.iter().enumerate() {
             let row = i as u32 / per_row;
@@ -221,14 +257,95 @@ pub fn encode_png(canvas: &Canvas) -> Result<Vec<u8>, image::ImageError> {
         }
     }
 
+    let image = downscale_to_fit(image);
     let mut bytes = Cursor::new(Vec::new());
     DynamicImage::ImageRgb8(image).write_to(&mut bytes, ImageFormat::Png)?;
     Ok(bytes.into_inner())
 }
 
-fn resolve_cell_size(width: u32, height: u32) -> u32 {
-    let long = width.max(height).saturating_add(2).max(1);
-    (MAX_SHEET_SIDE / long).clamp(14, 32)
+fn resolve_cell_size(grid_w: u32, grid_h: u32, legend_count: usize) -> u32 {
+    let fits = |c: u32| layout_fits(&plan_layout(grid_w, grid_h, c, legend_count));
+    let mut c = 32;
+    while c > 1 && !fits(c) {
+        c -= 1;
+    }
+    c
+}
+
+fn layout_fits(layout: &SheetLayout) -> bool {
+    layout.sheet_w <= MAX_SHEET_SIDE && layout.sheet_h <= MAX_SHEET_SIDE
+}
+
+struct SheetLayout {
+    pad: u32,
+    gap: u32,
+    swatch: u32,
+    section_gap: u32,
+    header_gap: u32,
+    grid_px_w: u32,
+    grid_px_h: u32,
+    sheet_w: u32,
+    sheet_h: u32,
+}
+
+fn plan_layout(grid_w: u32, grid_h: u32, cell: u32, legend_count: usize) -> SheetLayout {
+    let cell = cell.max(1);
+    let grid_px_w = grid_w.saturating_add(2).saturating_mul(cell);
+    let grid_px_h = grid_h.saturating_add(2).saturating_mul(cell);
+    let pad = cell.max(16);
+    let gap = (cell / 4).max(6);
+    let swatch = (cell * 2).clamp(36, 64);
+    let per_row = ((grid_px_w.saturating_sub(pad * 2).max(swatch) + gap) / (swatch + gap)).max(1);
+    let legend_rows = if legend_count == 0 {
+        0
+    } else {
+        (legend_count as u32 + per_row - 1) / per_row
+    };
+    let legend_block_h = if legend_rows == 0 {
+        0
+    } else {
+        pad + legend_rows * (swatch + gap) - gap + pad
+    };
+    let section_gap = if legend_rows == 0 { 0 } else { pad };
+    let header_gap = pad / 2;
+    let sheet_w = grid_px_w + pad * 2;
+    let sheet_h = pad + HEADER_H + header_gap + grid_px_h + section_gap + legend_block_h + pad;
+    SheetLayout {
+        pad,
+        gap,
+        swatch,
+        section_gap,
+        header_gap,
+        grid_px_w,
+        grid_px_h,
+        sheet_w,
+        sheet_h,
+    }
+}
+
+/// Emergency path for grids so large that even `cell == 1` overflows.
+fn downscale_to_fit(image: RgbImage) -> RgbImage {
+    let (w, h) = (image.width(), image.height());
+    let long = w.max(h);
+    if long <= MAX_SHEET_SIDE || w == 0 || h == 0 {
+        return image;
+    }
+    let scale = MAX_SHEET_SIDE as f32 / long as f32;
+    let nw = ((w as f32 * scale).round() as u32).max(1);
+    let nh = ((h as f32 * scale).round() as u32).max(1);
+    image::imageops::resize(&image, nw, nh, image::imageops::FilterType::Triangle)
+}
+
+/// Font size that fills most of a bead cell, shrinking only when the code
+/// would clip. Keeps codes readable after external downscale.
+fn fit_code_px(font: &Font, text: &str, cell: u32) -> f32 {
+    let mut px = (cell as f32 * CODE_PX_RATIO).clamp(6.0, CODE_PX_MAX);
+    let max_w = cell as f32 * CODE_FIT;
+    let w = measure_text(font, text, px);
+    if w > max_w && w > 0.0 {
+        px *= max_w / w;
+    }
+    px.max(6.0)
 }
 
 /// Bead-boundary indices in `0..=n`: outer edges plus every `every` beads
@@ -510,7 +627,7 @@ mod tests {
     };
 
     fn origins(width: u32, height: u32) -> (u32, u32, u32) {
-        let cell = resolve_cell_size(width, height);
+        let cell = resolve_cell_size(width, height, 0);
         let pad = cell.max(16);
         (cell, pad, pad + HEADER_H + pad / 2)
     }
@@ -666,5 +783,42 @@ mod tests {
                 p[0] > 200 && p[1] < 80 && p[2] < 100
             })
         }));
+    }
+
+    #[test]
+    fn sheet_stays_within_xhs_cap_and_codes_fit_cells() {
+        let font = sheet_font();
+        let px = fit_code_px(font, "A12", 20);
+        assert!(px >= 6.0);
+        assert!(measure_text(font, "A12", px) <= 20.0 * CODE_FIT + 0.5);
+
+        // Typical XHS grid: 104×104 with a full legend.
+        let mut c = Canvas::new(104, 104, PaletteMode::Colors221).unwrap();
+        c.paint_line(0, 0, 103, 0, "F5", BrushSize::One).unwrap();
+        let im = image::load_from_memory(&encode_png(&c).unwrap())
+            .unwrap()
+            .to_rgb8();
+        assert!(im.width() <= MAX_SHEET_SIDE);
+        assert!(im.height() <= MAX_SHEET_SIDE);
+    }
+
+    #[test]
+    fn large_grid_is_downscaled_to_cap() {
+        // Pathological layout: even cell=1 overflows the cap.
+        let cell = resolve_cell_size(3000, 8, 2);
+        assert_eq!(cell, 1);
+        let wide = RgbImage::from_pixel(3000, 8, Rgb(PAGE_RGB));
+        let fitted = downscale_to_fit(wide);
+        assert!(fitted.width() <= MAX_SHEET_SIDE);
+        assert!(fitted.height() <= MAX_SHEET_SIDE);
+
+        // Full-size canvas must still produce a printable sheet under the cap.
+        let mut c = Canvas::new(128, 128, PaletteMode::Colors221).unwrap();
+        c.paint_line(0, 0, 127, 0, "F5", BrushSize::One).unwrap();
+        let im = image::load_from_memory(&encode_png(&c).unwrap())
+            .unwrap()
+            .to_rgb8();
+        assert!(im.width() <= MAX_SHEET_SIDE);
+        assert!(im.height() <= MAX_SHEET_SIDE);
     }
 }

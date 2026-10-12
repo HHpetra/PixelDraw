@@ -175,7 +175,7 @@ image tool results.
 | `pattern` | `cat.png`: a labelled bead chart |
 | `both` | `cat.png` and `cat-pattern.png`, with both previews returned in that order |
 
-Charts place a MARD code in each occupied cell and a light-blue index band with one-based numbers on all four sides. Black counting lines run outward from the center every ten beads, including the outer frame. The header shows size, palette, color count, and bead count, with the Xiaohongshu mark and 豆图工坊 at the right. Square swatches below show the code and count on two lines, such as `H2` and `(12)`, without color names. Rendering uses an embedded font and needs no Python, system fonts, or network. Charts are PNG only, without SVG/PDF, pagination, or physical 1:1 printing. Drawing coordinates remain zero-based.
+Charts place a MARD code in each occupied cell and a light-blue index band with one-based numbers on all four sides. Black counting lines run outward from the center every ten beads, including the outer frame. The header shows size, palette, color count, and bead count, with the Xiaohongshu mark and 豆图工坊 at the right. Square swatches below show the code and count on two lines, such as `H2` and `(12)`, without color names. Exported sheets stay within 2048px per side (Xiaohongshu recompresses larger images and bead codes go muddy); codes and index numbers are enlarged, fitted to the cell, and stroke-thickened so they survive that downscale. Rendering uses an embedded font and needs no Python, system fonts, or network. Charts are PNG only, without SVG/PDF, pagination, or physical 1:1 printing. Drawing coordinates remain zero-based.
 
 ```text
 create_canvas {"width":24,"height":24,"palette":"221","background":"empty"}
