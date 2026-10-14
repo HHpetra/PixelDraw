@@ -448,4 +448,259 @@ mod tests {
             line_points(1, 1, 3, 1)
         );
     }
+
+    // --- Drawing quality: continuity (no gaps) and thinness (no extra bulk) ---
+
+    use std::collections::HashSet;
+
+    /// Consecutive samples may sit on the same pixel, but never jump.
+    fn is_8_connected_path(points: &[(i32, i32)]) -> bool {
+        points.windows(2).all(|w| {
+            (w[0].0 - w[1].0).abs() <= 1 && (w[0].1 - w[1].1).abs() <= 1
+        })
+    }
+
+    /// Every cell is reachable from an arbitrary start via 8-neighbors.
+    fn is_8_connected_region(cells: &HashSet<(i32, i32)>) -> bool {
+        let Some(&start) = cells.iter().next() else {
+            return true;
+        };
+        let mut seen = HashSet::from([start]);
+        let mut stack = vec![start];
+        while let Some((x, y)) = stack.pop() {
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    if dx == 0 && dy == 0 {
+                        continue;
+                    }
+                    let next = (x + dx, y + dy);
+                    if cells.contains(&next) && seen.insert(next) {
+                        stack.push(next);
+                    }
+                }
+            }
+        }
+        seen.len() == cells.len()
+    }
+
+    fn unique(points: &[(i32, i32)]) -> HashSet<(i32, i32)> {
+        points.iter().copied().collect()
+    }
+
+    /// Bresenham line: endpoints on the path, one cell per major-axis step
+    /// (never two cells sharing a major coordinate → no unnecessary thickness),
+    /// and 8-connected samples with no gaps.
+    fn assert_line_quality(x0: i32, y0: i32, x1: i32, y1: i32) {
+        let points = line_points(x0, y0, x1, y1);
+        assert_eq!(points.first(), Some(&(x0, y0)), "{x0},{y0}->{x1},{y1}");
+        assert_eq!(points.last(), Some(&(x1, y1)), "{x0},{y0}->{x1},{y1}");
+        let dx = (x1 - x0).abs();
+        let dy = (y1 - y0).abs();
+        assert_eq!(
+            points.len(),
+            dx.max(dy) as usize + 1,
+            "line should be thin: {x0},{y0}->{x1},{y1}"
+        );
+        for w in points.windows(2) {
+            let step_x = (w[0].0 - w[1].0).abs();
+            let step_y = (w[0].1 - w[1].1).abs();
+            // Orthogonal or diagonal neighbor; never a jump, never a duplicate.
+            assert!(
+                step_x <= 1 && step_y <= 1 && step_x + step_y >= 1,
+                "gap or duplicate step {w:?} on {x0},{y0}->{x1},{y1}"
+            );
+        }
+        let mut xs: Vec<i32> = points.iter().map(|p| p.0).collect();
+        xs.sort_unstable();
+        let count = xs.len();
+        xs.dedup();
+        let mut ys: Vec<i32> = points.iter().map(|p| p.1).collect();
+        ys.sort_unstable();
+        let count_y = ys.len();
+        ys.dedup();
+        if dx >= dy {
+            assert_eq!(xs.len(), count, "two cells share a column (thick) {x0},{y0}->{x1},{y1}");
+        } else {
+            assert_eq!(ys.len(), count_y, "two cells share a row (thick) {x0},{y0}->{x1},{y1}");
+        }
+    }
+
+    #[test]
+    fn lines_in_all_directions_are_connected_and_thin() {
+        // Axis-aligned, diagonals, shallow, steep, and every sign combination.
+        let deltas = [
+            (0, 0),
+            (7, 0),
+            (0, 7),
+            (-7, 0),
+            (0, -7),
+            (6, 6),
+            (6, -6),
+            (-6, 6),
+            (-6, -6),
+            (8, 1),
+            (8, -1),
+            (-8, 1),
+            (-8, -1),
+            (1, 8),
+            (1, -8),
+            (-1, 8),
+            (-1, -8),
+            (8, 2),
+            (8, 3),
+            (5, 8),
+            (2, 8),
+            (3, 5),
+            (4, 4),
+            (5, 3),
+        ];
+        for &(dx, dy) in &deltas {
+            // Keep both endpoints inside a 17×17 field around the origin.
+            let (x0, y0) = if dx >= 0 && dy >= 0 {
+                (0, 0)
+            } else if dx < 0 && dy >= 0 {
+                (-dx, 0)
+            } else if dx >= 0 && dy < 0 {
+                (0, -dy)
+            } else {
+                (-dx, -dy)
+            };
+            let (x1, y1) = (x0 + dx, y0 + dy);
+            assert_line_quality(x0, y0, x1, y1);
+            // Reversing the endpoints must stay thin and gap-free.
+            assert_line_quality(x1, y1, x0, y0);
+        }
+    }
+
+    #[test]
+    fn line_neighbors_are_not_implicitly_thickened() {
+        // A long shallow line must not spill into adjacent rows.
+        let points = line_points(0, 0, 12, 2);
+        let rows: HashSet<i32> = points.iter().map(|p| p.1).collect();
+        assert!(rows.len() <= 3, "shallow line spread over rows {rows:?}");
+        let points = line_points(0, 0, 2, 12);
+        let cols: HashSet<i32> = points.iter().map(|p| p.0).collect();
+        assert!(cols.len() <= 3, "steep line spread over cols {cols:?}");
+    }
+
+    #[test]
+    fn rect_stroke_is_hollow_and_fill_is_exact_block() {
+        let stroke = unique(&rect_stroke_points(1, 1, 6, 5));
+        for y in 2..5 {
+            for x in 2..6 {
+                assert!(!stroke.contains(&(x, y)), "stroke leaked into interior ({x},{y})");
+            }
+        }
+        for x in 1..=6 {
+            assert!(stroke.contains(&(x, 1)), "missing top edge x={x}");
+            assert!(stroke.contains(&(x, 5)), "missing bottom edge x={x}");
+        }
+        for y in 1..=5 {
+            assert!(stroke.contains(&(1, y)), "missing left edge y={y}");
+            assert!(stroke.contains(&(6, y)), "missing right edge y={y}");
+        }
+        // 1px border of a 6×5 block: 2w + 2h − 4 = 18 cells.
+        assert_eq!(stroke.len(), 2 * 6 + 2 * 5 - 4, "stroke thicker or thinner than a 1px border");
+
+        let fill = unique(&rect_fill_points(1, 1, 6, 5));
+        assert_eq!(fill.len(), 6 * 5);
+        assert!(stroke.is_subset(&fill));
+    }
+
+    #[test]
+    fn circle_stroke_is_a_thin_ring_not_a_disk() {
+        let r = 5;
+        let stroke = unique(&circle_stroke_points(8, 8, r));
+        assert!(!stroke.contains(&(8, 8)), "stroke filled the center");
+        assert!(!stroke.contains(&(8, 9)), "stroke filled near-center");
+        assert!(!stroke.contains(&(8, 10)), "stroke filled interior");
+        assert!(is_8_connected_region(&stroke), "ring has gaps");
+        // Thin ring: circumference order, not a disk.
+        let fill = unique(&circle_fill_points(8, 8, r));
+        assert!(fill.contains(&(8, 8)));
+        assert!(
+            stroke.len() * 2 < fill.len(),
+            "stroke looks filled: {} vs {}",
+            stroke.len(),
+            fill.len()
+        );
+        assert!(
+            (4 * r as usize..=12 * r as usize).contains(&stroke.len()),
+            "ring unnaturally sparse or thick: {}",
+            stroke.len()
+        );
+        // Every stroke cell sits on a ~1px annulus around radius r
+        // (midpoint stroke and analytic fill may differ on the boundary pixel).
+        for &(x, y) in &stroke {
+            let dist2 = (x - 8) as i64 * (x - 8) as i64 + (y - 8) as i64 * (y - 8) as i64;
+            let lo = (r as i64 - 1) * (r as i64 - 1);
+            let hi = (r as i64 + 1) * (r as i64 + 1);
+            assert!(
+                (lo..=hi).contains(&dist2),
+                "stroke cell ({x},{y}) is off the rim (dist²={dist2})"
+            );
+        }
+    }
+
+    #[test]
+    fn ellipse_stroke_is_hollow_and_connected() {
+        let (cx, cy, rx, ry) = (10, 8, 7, 4);
+        let stroke = unique(&ellipse_stroke_points(cx, cy, rx, ry));
+        assert!(!stroke.contains(&(cx, cy)), "ellipse stroke filled center");
+        assert!(!stroke.contains(&(cx, cy + 1)), "ellipse stroke filled interior");
+        assert!(is_8_connected_region(&stroke), "ellipse ring has gaps");
+        let fill = unique(&ellipse_fill_points(cx, cy, rx, ry));
+        assert!(fill.contains(&(cx, cy)));
+        assert!(stroke.len() * 2 < fill.len());
+        // Rim cells stay near the ellipse boundary (normalized distance ≈ 1).
+        for &(x, y) in &stroke {
+            let dx = (x - cx) as f64 / rx as f64;
+            let dy = (y - cy) as f64 / ry as f64;
+            let n = (dx * dx + dy * dy).sqrt();
+            assert!(
+                (0.5..=1.5).contains(&n),
+                "stroke cell ({x},{y}) is off the ellipse rim (norm={n:.2})"
+            );
+        }
+    }
+
+    #[test]
+    fn triangle_stroke_has_edges_without_filling() {
+        let stroke = unique(&triangle_stroke_points(2, 2, 12, 2, 2, 12));
+        assert!(stroke.contains(&(2, 2)));
+        assert!(stroke.contains(&(12, 2)));
+        assert!(stroke.contains(&(2, 12)));
+        assert!(stroke.contains(&(2, 7)), "left edge broken");
+        assert!(stroke.contains(&(7, 2)), "top edge broken");
+        assert!(!stroke.contains(&(4, 4)), "stroke filled interior");
+        assert!(is_8_connected_region(&stroke), "triangle outline has gaps");
+
+        let fill = unique(&triangle_fill_points(2, 2, 12, 2, 2, 12));
+        assert!(fill.contains(&(3, 3)), "fill missing interior");
+        assert!(fill.contains(&(2, 2)));
+        assert!(stroke.is_subset(&fill));
+        assert!(fill.len() > stroke.len());
+    }
+
+    #[test]
+    fn curves_stay_gap_free_from_start_to_end() {
+        let quad = quadratic_bezier_points(0, 12, 8, 0, 16, 12);
+        assert!(is_8_connected_path(&quad), "quadratic Bezier has a gap");
+        assert!(quad.contains(&(0, 12)) && quad.contains(&(16, 12)));
+
+        let cubic = cubic_bezier_points((0, 16), (0, 0), (16, 0), (16, 16));
+        assert!(is_8_connected_path(&cubic), "cubic Bezier has a gap");
+        assert!(cubic.contains(&(0, 16)) && cubic.contains(&(16, 16)));
+
+        let spline = catmull_rom_points(&[(0, 16), (4, 0), (12, 16), (16, 4)]);
+        assert!(is_8_connected_path(&spline), "Catmull-Rom has a gap");
+        assert!(spline.contains(&(0, 16)));
+        assert!(spline.contains(&(16, 4)));
+
+        // Curves must not paint a solid blob (no unnecessary bulk).
+        let area = 17 * 17;
+        assert!(unique(&quad).len() * 2 < area);
+        assert!(unique(&cubic).len() * 2 < area);
+        assert!(unique(&spline).len() * 2 < area);
+    }
 }

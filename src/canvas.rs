@@ -1306,4 +1306,245 @@ mod tests {
         assert!(matches!(err, CanvasError::OutOfBounds { x: 4, .. }));
         assert_eq!(tight.pixels[0], PaletteMode::Colors221.white_rgb());
     }
+
+    // --- Drawing quality on the canvas: gaps and unnecessary bulk ---
+
+    use std::collections::HashSet;
+
+    fn black() -> [u8; 3] {
+        [0, 0, 0]
+    }
+
+    fn cells_with(canvas: &Canvas, rgb: [u8; 3]) -> HashSet<(u32, u32)> {
+        canvas
+            .pixels
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| **p == rgb)
+            .map(|(i, _)| ((i as u32) % canvas.width(), (i as u32) / canvas.width()))
+            .collect()
+    }
+
+    fn is_8_connected_region(cells: &HashSet<(u32, u32)>) -> bool {
+        let Some(&start) = cells.iter().next() else {
+            return true;
+        };
+        let mut seen = HashSet::from([start]);
+        let mut stack = vec![start];
+        while let Some((x, y)) = stack.pop() {
+            for dy in -1i32..=1 {
+                for dx in -1i32..=1 {
+                    if dx == 0 && dy == 0 {
+                        continue;
+                    }
+                    let nx = x as i32 + dx;
+                    let ny = y as i32 + dy;
+                    if nx < 0 || ny < 0 {
+                        continue;
+                    }
+                    let next = (nx as u32, ny as u32);
+                    if cells.contains(&next) && seen.insert(next) {
+                        stack.push(next);
+                    }
+                }
+            }
+        }
+        seen.len() == cells.len()
+    }
+
+    /// Paint a line with brush 1 and assert it is a thin connected path:
+    /// exact cell count, 8-connected, and no two cells sharing a major coordinate.
+    fn assert_line_paints_thin(canvas_size: u32, x0: u32, y0: u32, x1: u32, y1: u32) {
+        let mut canvas = Canvas::new(canvas_size, canvas_size, PaletteMode::Colors24).unwrap();
+        let written = canvas
+            .paint_line(x0, y0, x1, y1, "纯黑", BrushSize::One)
+            .unwrap();
+        let cells = cells_with(&canvas, black());
+        let dx = x1.abs_diff(x0);
+        let dy = y1.abs_diff(y0);
+        assert_eq!(
+            written,
+            dx.max(dy) as usize + 1,
+            "line {x0},{y0}->{x1},{y1} painted extra cells"
+        );
+        assert_eq!(cells.len(), written);
+        assert!(cells.contains(&(x0, y0)) && cells.contains(&(x1, y1)));
+        assert!(
+            is_8_connected_region(&cells),
+            "line {x0},{y0}->{x1},{y1} has a gap: {cells:?}"
+        );
+        if dx >= dy {
+            let mut xs: Vec<u32> = cells.iter().map(|c| c.0).collect();
+            xs.sort_unstable();
+            let n = xs.len();
+            xs.dedup();
+            assert_eq!(xs.len(), n, "line {x0},{y0}->{x1},{y1} is thicker than 1px in y");
+        } else {
+            let mut ys: Vec<u32> = cells.iter().map(|c| c.1).collect();
+            ys.sort_unstable();
+            let n = ys.len();
+            ys.dedup();
+            assert_eq!(ys.len(), n, "line {x0},{y0}->{x1},{y1} is thicker than 1px in x");
+        }
+    }
+
+    #[test]
+    fn lines_in_all_directions_paint_without_gaps_or_bulk() {
+        // Horizontal / vertical / both diagonals / shallow / steep, both directions.
+        let segments = [
+            (0, 0, 15, 0),
+            (15, 0, 0, 0),
+            (0, 15, 0, 0),
+            (0, 0, 0, 15),
+            (0, 0, 15, 15),
+            (15, 15, 0, 0),
+            (15, 0, 0, 15),
+            (0, 15, 15, 0),
+            (0, 0, 15, 2),
+            (15, 2, 0, 0),
+            (0, 15, 2, 0),
+            (2, 0, 0, 15),
+            (0, 0, 15, 3),
+            (0, 0, 3, 15),
+            (1, 1, 14, 7),
+            (14, 1, 1, 7),
+            (1, 14, 7, 1),
+            (1, 1, 7, 14),
+            (4, 4, 12, 4),
+            (4, 4, 4, 12),
+        ];
+        for &(x0, y0, x1, y1) in &segments {
+            assert_line_paints_thin(16, x0, y0, x1, y1);
+        }
+    }
+
+    #[test]
+    fn horizontal_line_does_not_bleed_into_neighbor_rows() {
+        let mut canvas = Canvas::new(16, 16, PaletteMode::Colors24).unwrap();
+        canvas
+            .paint_line(2, 8, 12, 8, "纯黑", BrushSize::One)
+            .unwrap();
+        let cells = cells_with(&canvas, black());
+        assert_eq!(cells.len(), 11);
+        assert!(cells.iter().all(|&(_, y)| y == 8), "vertical bleed: {cells:?}");
+    }
+
+    #[test]
+    fn vertical_line_does_not_bleed_into_neighbor_columns() {
+        let mut canvas = Canvas::new(16, 16, PaletteMode::Colors24).unwrap();
+        canvas
+            .paint_line(6, 1, 6, 11, "纯黑", BrushSize::One)
+            .unwrap();
+        let cells = cells_with(&canvas, black());
+        assert_eq!(cells.len(), 11);
+        assert!(cells.iter().all(|&(x, _)| x == 6), "horizontal bleed: {cells:?}");
+    }
+
+    #[test]
+    fn brush_one_stamps_exactly_one_cell() {
+        let mut canvas = Canvas::new(8, 8, PaletteMode::Colors24).unwrap();
+        canvas
+            .paint(&[stamp(3, 4, "纯黑")], BrushSize::One)
+            .unwrap();
+        let cells = cells_with(&canvas, black());
+        assert_eq!(cells, HashSet::from([(3, 4)]));
+    }
+
+    #[test]
+    fn stroke_shapes_leave_interior_unpainted() {
+        let mut rect = Canvas::new(16, 16, PaletteMode::Colors24).unwrap();
+        rect.paint_rect(2, 2, 12, 10, "纯黑", false, BrushSize::One)
+            .unwrap();
+        let rect_cells = cells_with(&rect, black());
+        assert!(!rect_cells.contains(&(5, 5)), "rect stroke filled interior");
+        assert!(rect_cells.contains(&(2, 2)) && rect_cells.contains(&(12, 10)));
+        assert!(is_8_connected_region(&rect_cells));
+
+        let mut circle = Canvas::new(16, 16, PaletteMode::Colors24).unwrap();
+        circle
+            .paint_circle(8, 8, 5, "纯黑", false, BrushSize::One)
+            .unwrap();
+        let circle_cells = cells_with(&circle, black());
+        assert!(!circle_cells.contains(&(8, 8)), "circle stroke filled center");
+        assert!(!circle_cells.contains(&(8, 9)), "circle stroke filled interior");
+        assert!(is_8_connected_region(&circle_cells), "circle ring has gaps");
+
+        let mut ellipse = Canvas::new(16, 16, PaletteMode::Colors24).unwrap();
+        ellipse
+            .paint_ellipse(8, 8, 6, 3, "纯黑", false, BrushSize::One)
+            .unwrap();
+        let ellipse_cells = cells_with(&ellipse, black());
+        assert!(!ellipse_cells.contains(&(8, 8)), "ellipse stroke filled center");
+        assert!(is_8_connected_region(&ellipse_cells));
+
+        let mut triangle = Canvas::new(16, 16, PaletteMode::Colors24).unwrap();
+        triangle
+            .paint_triangle(2, 2, 13, 2, 2, 13, "纯黑", false, BrushSize::One)
+            .unwrap();
+        let tri_cells = cells_with(&triangle, black());
+        assert!(!tri_cells.contains(&(4, 4)), "triangle stroke filled interior");
+        assert!(is_8_connected_region(&tri_cells));
+    }
+
+    #[test]
+    fn fills_cover_their_strokes_without_out_of_bounds() {
+        let mut canvas = Canvas::new(16, 16, PaletteMode::Colors24).unwrap();
+        canvas
+            .paint_rect(3, 3, 10, 9, "纯黑", true, BrushSize::One)
+            .unwrap();
+        let cells = cells_with(&canvas, black());
+        assert_eq!(cells.len(), 8 * 7);
+        assert!(cells.iter().all(|&(x, y)| (3..=10).contains(&x) && (3..=9).contains(&y)));
+
+        let mut circle = Canvas::new(16, 16, PaletteMode::Colors24).unwrap();
+        circle
+            .paint_circle(8, 8, 4, "纯黑", true, BrushSize::One)
+            .unwrap();
+        let disk = cells_with(&circle, black());
+        assert!(disk.contains(&(8, 8)));
+        assert!(disk.len() > 20);
+        assert!(disk.iter().all(|&(x, y)| x.abs_diff(8) <= 4 && y.abs_diff(8) <= 4));
+    }
+
+    #[test]
+    fn curves_paint_contiguous_paths() {
+        let cases: [&[(u32, u32)]; 3] = [
+            &[(1, 12), (8, 1), (15, 12)],
+            &[(1, 15), (1, 1), (15, 1), (15, 15)],
+            &[(1, 8), (5, 1), (11, 15), (15, 8), (12, 2)],
+        ];
+        for points in cases {
+            let mut canvas = Canvas::new(16, 16, PaletteMode::Colors24).unwrap();
+            canvas
+                .paint_curve(points, "纯黑", BrushSize::One)
+                .unwrap();
+            let cells = cells_with(&canvas, black());
+            assert!(cells.contains(&points[0]), "curve missing start");
+            assert!(cells.contains(&points[points.len() - 1]), "curve missing end");
+            assert!(
+                is_8_connected_region(&cells),
+                "curve {points:?} has a gap ({ } cells)",
+                cells.len()
+            );
+        }
+    }
+
+    #[test]
+    fn flood_fill_stays_inside_closed_boundaries() {
+        let mut canvas = Canvas::new(12, 12, PaletteMode::Colors24).unwrap();
+        // Hollow rectangle border in black on white background.
+        canvas
+            .paint_rect(2, 2, 9, 9, "纯黑", false, BrushSize::One)
+            .unwrap();
+        let filled = canvas.flood_fill(5, 5, "正红").unwrap();
+        let red = palette::resolve_color(PaletteMode::Colors24, "正红").unwrap();
+        let red_cells = cells_with(&canvas, red.rgb);
+        // Interior of 8×8 border is 6×6 = 36 cells.
+        assert_eq!(filled, 36);
+        assert_eq!(red_cells.len(), 36);
+        assert!(red_cells.iter().all(|&(x, y)| (3..=8).contains(&x) && (3..=8).contains(&y)));
+        // Exterior white and the black border stay untouched.
+        assert_eq!(canvas.codes()[0], Some("H2"));
+        assert_eq!(canvas.codes()[2 * 12 + 2], Some("H7"));
+    }
 }
