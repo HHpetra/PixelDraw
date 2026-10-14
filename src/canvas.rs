@@ -7,6 +7,9 @@ use crate::shapes;
 
 pub const MAX_SIZE: u32 = 128;
 pub const SCALE: u32 = 8;
+/// Radii larger than this cannot cover the canvas after clipping, so they are
+/// capped before rasterization (avoids unbounded point buffers and i64 overflow).
+pub const MAX_RADIUS: u32 = 256;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum BrushSize {
@@ -226,7 +229,7 @@ impl Canvas {
     }
 
     /// Validate the whole batch, then paint. Any invalid stamp rejects everything.
-    /// Returns the number of pixels written (stamps × brush²).
+    /// Returns how many distinct canvas cells were written.
     pub fn paint(
         &mut self,
         updates: &[PixelUpdate],
@@ -268,15 +271,21 @@ impl Canvas {
             return Ok(0);
         }
         self.push_undo();
+        let mut touched = vec![false; self.pixels.len()];
+        let mut written = 0usize;
         for (x, y, color) in resolved {
             for dy in 0..n {
                 for dx in 0..n {
                     let index = ((y + dy) * self.width + (x + dx)) as usize;
                     self.write_cell(index, color);
+                    if !touched[index] {
+                        touched[index] = true;
+                        written += 1;
+                    }
                 }
             }
         }
-        Ok(updates.len() * (n as usize) * (n as usize))
+        Ok(written)
     }
 
     /// Keep display color, canonical bead code and occupancy in sync.
@@ -285,23 +294,31 @@ impl Canvas {
         self.codes[index] = color.map(|c| c.code);
     }
 
-    /// Stamp a brush-sized square centered on `(x, y)`, clipping at the edges.
-    /// Returns how many pixels were written.
-    fn stamp_centered(&mut self, x: i32, y: i32, color: &Color, n: u32) -> usize {
-        let offset = (n as i32) / 2;
-        let left = x - offset;
-        let top = y - offset;
+    /// Stamp a brush-sized square with top-left at `(x, y)`, clipping at the edges.
+    /// Same footprint as `draw_pixels` at the same coordinates. Marks `touched`
+    /// and returns how many previously untouched cells were written.
+    fn stamp_block(
+        &mut self,
+        x: i32,
+        y: i32,
+        color: Option<&Color>,
+        n: u32,
+        touched: &mut [bool],
+    ) -> usize {
         let mut written = 0;
         for dy in 0..n as i32 {
             for dx in 0..n as i32 {
-                let px = left + dx;
-                let py = top + dy;
+                let px = x + dx;
+                let py = y + dy;
                 if px < 0 || py < 0 || px >= self.width as i32 || py >= self.height as i32 {
                     continue;
                 }
                 let index = (py as u32 * self.width + px as u32) as usize;
-                self.write_cell(index, Some(color));
-                written += 1;
+                self.write_cell(index, color);
+                if !touched[index] {
+                    touched[index] = true;
+                    written += 1;
+                }
             }
         }
         written
@@ -309,7 +326,7 @@ impl Canvas {
 
     /// Paint pre-rasterized shape points with a brush stamp on each point.
     /// Coordinates may fall outside the canvas; those stamps are clipped.
-    /// Records one undo step when at least one point is supplied.
+    /// Records one undo step only when at least one cell is written.
     pub fn paint_shape_points(
         &mut self,
         points: &[(i32, i32)],
@@ -326,9 +343,13 @@ impl Canvas {
         }
         self.push_undo();
         let n = brush.size();
+        let mut touched = vec![false; self.pixels.len()];
         let mut written = 0;
         for &(x, y) in points {
-            written += self.stamp_centered(x, y, color, n);
+            written += self.stamp_block(x, y, Some(color), n, &mut touched);
+        }
+        if written == 0 {
+            self.undo.pop();
         }
         Ok(written)
     }
@@ -410,7 +431,7 @@ impl Canvas {
         brush: BrushSize,
     ) -> Result<usize, CanvasError> {
         self.require_point(cx, cy)?;
-        let r = radius as i32;
+        let r = radius.min(MAX_RADIUS) as i32;
         let points = if fill {
             shapes::circle_fill_points(cx as i32, cy as i32, r)
         } else {
@@ -432,10 +453,12 @@ impl Canvas {
         brush: BrushSize,
     ) -> Result<usize, CanvasError> {
         self.require_point(cx, cy)?;
+        let rx = rx.min(MAX_RADIUS) as i32;
+        let ry = ry.min(MAX_RADIUS) as i32;
         let points = if fill {
-            shapes::ellipse_fill_points(cx as i32, cy as i32, rx as i32, ry as i32)
+            shapes::ellipse_fill_points(cx as i32, cy as i32, rx, ry)
         } else {
-            shapes::ellipse_stroke_points(cx as i32, cy as i32, rx as i32, ry as i32)
+            shapes::ellipse_stroke_points(cx as i32, cy as i32, rx, ry)
         };
         let brush = if fill { BrushSize::One } else { brush };
         self.paint_shape_points(&points, color, brush)
@@ -491,17 +514,24 @@ impl Canvas {
 
     /// 4-connected flood fill replacing the seed bead code (or empty cells).
     /// Returns pixels changed; empty cells are distinct from white beads.
+    /// `color` may be `-` to clear the region back to empty cells.
     pub fn flood_fill(&mut self, x: u32, y: u32, color: &str) -> Result<usize, CanvasError> {
         self.require_point(x, y)?;
-        let color =
-            palette::resolve_color(self.mode, color).ok_or_else(|| CanvasError::UnknownColor {
-                color: color.to_string(),
-                mode: self.mode,
-            })?;
+        let fill = if color.trim() == "-" {
+            None
+        } else {
+            Some(palette::resolve_color(self.mode, color).ok_or_else(|| {
+                CanvasError::UnknownColor {
+                    color: color.to_string(),
+                    mode: self.mode,
+                }
+            })?)
+        };
         let seed_index = (y * self.width + x) as usize;
         // Compare by bead code: empty cells and H2 share the same RGB.
         let target = self.codes[seed_index];
-        if target == Some(color.code) {
+        let new_code = fill.map(|c| c.code);
+        if target == new_code {
             return Ok(0);
         }
         self.push_undo();
@@ -512,7 +542,7 @@ impl Canvas {
             if self.codes[index] != target {
                 continue;
             }
-            self.write_cell(index, Some(color));
+            self.write_cell(index, fill);
             written += 1;
             if px > 0 {
                 stack.push((px - 1, py));
@@ -526,6 +556,9 @@ impl Canvas {
             if py + 1 < self.height {
                 stack.push((px, py + 1));
             }
+        }
+        if written == 0 {
+            self.undo.pop();
         }
         Ok(written)
     }
@@ -1081,11 +1114,88 @@ mod tests {
         let written = canvas
             .paint_line(1, 1, 5, 1, "纯黑", BrushSize::Two)
             .unwrap();
+        // Horizontal centerline y=1, brush 2 → rows 1..=2 (top-left of each stamp).
         assert!(written >= 10);
         let black = [0, 0, 0];
-        assert_eq!(canvas.pixels[9], black);
-        assert_eq!(canvas.pixels[1], black);
-        assert_eq!(canvas.pixels[10], black);
+        let white = PaletteMode::Colors24.white_rgb();
+        assert_eq!(canvas.pixels[9], black); // (1,1)
+        assert_eq!(canvas.pixels[10], black); // (2,1)
+        assert_eq!(canvas.pixels[8 + 2], black); // (2,2) below centerline
+        assert_eq!(canvas.pixels[1], white); // (1,0) not covered
+    }
+
+    #[test]
+    fn brush_footprint_matches_between_pixels_and_stroke() {
+        let mut via_pixels = Canvas::new(8, 8, PaletteMode::Colors24).unwrap();
+        via_pixels
+            .paint(&[stamp(2, 2, "纯黑")], BrushSize::Two)
+            .unwrap();
+        let mut via_stroke = Canvas::new(8, 8, PaletteMode::Colors24).unwrap();
+        via_stroke
+            .paint_line(2, 2, 2, 2, "纯黑", BrushSize::Two)
+            .unwrap();
+        assert_eq!(via_pixels.pixels, via_stroke.pixels);
+        assert_eq!(via_pixels.codes, via_stroke.codes);
+
+        let mut via_pixels4 = Canvas::new(8, 8, PaletteMode::Colors24).unwrap();
+        via_pixels4
+            .paint(&[stamp(0, 0, "纯黑")], BrushSize::Four)
+            .unwrap();
+        let mut via_stroke4 = Canvas::new(8, 8, PaletteMode::Colors24).unwrap();
+        via_stroke4
+            .paint_line(0, 0, 0, 0, "纯黑", BrushSize::Four)
+            .unwrap();
+        assert_eq!(via_pixels4.pixels, via_stroke4.pixels);
+    }
+
+    #[test]
+    fn huge_radius_is_capped_without_hanging() {
+        let mut canvas = Canvas::new(8, 8, PaletteMode::Colors24).unwrap();
+        let before = canvas.undo_len();
+        let written = canvas
+            .paint_circle(4, 4, u32::MAX, "纯黑", true, BrushSize::One)
+            .unwrap();
+        assert!(written > 0);
+        assert_eq!(canvas.pixels[4 * 8 + 4], [0, 0, 0]);
+        assert_eq!(canvas.undo_len(), before + 1);
+
+        let mut stroke = Canvas::new(8, 8, PaletteMode::Colors24).unwrap();
+        let w = stroke
+            .paint_ellipse(4, 4, 3_000_000_000, 3_000_000_000, "纯黑", true, BrushSize::One)
+            .unwrap();
+        assert!(w > 0);
+        assert_eq!(stroke.pixels[4 * 8 + 4], [0, 0, 0]);
+    }
+
+    #[test]
+    fn fully_clipped_stroke_records_no_undo() {
+        let mut canvas = Canvas::new(4, 4, PaletteMode::Colors24).unwrap();
+        let before = canvas.undo_len();
+        let written = canvas
+            .paint_circle(1, 1, 50, "纯黑", false, BrushSize::One)
+            .unwrap();
+        assert_eq!(written, 0);
+        assert_eq!(canvas.undo_len(), before);
+    }
+
+    #[test]
+    fn flood_fill_dash_clears_to_empty() {
+        let mut canvas = Canvas::new(6, 6, PaletteMode::Colors24).unwrap();
+        canvas
+            .paint_rect(1, 1, 4, 4, "纯黑", true, BrushSize::One)
+            .unwrap();
+        assert_eq!(canvas.codes[2 * 6 + 2], Some("H7"));
+        let cleared = canvas.flood_fill(2, 2, "-").unwrap();
+        assert_eq!(cleared, 16);
+        assert_eq!(canvas.codes[2 * 6 + 2], None);
+        assert_eq!(canvas.codes[0], Some("H2"));
+        // White beads are a distinct region: clearing them empties that region.
+        assert_eq!(canvas.flood_fill(0, 0, "-").unwrap(), 20);
+        assert_eq!(canvas.codes[0], None);
+        // Clearing already-empty is a no-op and records no undo.
+        let undo_before = canvas.undo_len();
+        assert_eq!(canvas.flood_fill(0, 0, "-").unwrap(), 0);
+        assert_eq!(canvas.undo_len(), undo_before);
     }
 
     #[test]

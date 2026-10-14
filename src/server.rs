@@ -131,7 +131,7 @@ pub struct DrawTriangleRequest {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct DrawCircleRequest {
-    /// 圆心 X，必须在图纸范围内；半径可以超出图纸，超出部分裁剪
+    /// 圆心 X，必须在图纸范围内；半径可以超出图纸，超出部分裁剪（超过 256 按 256）
     pub cx: u32,
     /// 圆心 Y
     pub cy: u32,
@@ -172,7 +172,7 @@ pub struct DrawCurveRequest {
     pub points: Vec<[u32; 2]>,
     /// 颜色
     pub color: String,
-    /// 线宽笔刷 1/2/4/8，默认 1。以落点为中心加粗，坐标不必对齐网格。
+    /// 线宽笔刷 1/2/4/8，默认 1。从落点向右下扩展 N×N（与 draw_pixels 一致），坐标不必对齐网格。
     #[serde(default)]
     pub brush: Option<u32>,
 }
@@ -190,7 +190,7 @@ pub struct FloodFillRequest {
     pub x: u32,
     /// 种子点 Y
     pub y: u32,
-    /// 填充颜色；替换与种子点相连的同色号区域（四连通），空格与白豆分开处理
+    /// 填充颜色；替换与种子点相连的同色号区域（四连通），空格与白豆分开处理；可用 - 清为空格
     pub color: String,
 }
 
@@ -421,7 +421,7 @@ impl PixelDraw {
     }
 
     #[tool(
-        description = "画一条直线（Bresenham）。仅用于大面积绘制，细节请尽量用像素绘制。参数为起点 (x0,y0)、终点 (x1,y1) 和颜色；两端点必须在图纸内。可选 brush 为线宽 1、2、4 或 8（默认 1），按画笔大小加粗，坐标不必对齐网格。返回 8 倍放大 PNG，可据预览继续修改和调整。"
+        description = "画一条直线（Bresenham）。仅用于大面积绘制，细节请尽量用像素绘制。参数为起点 (x0,y0)、终点 (x1,y1) 和颜色；两端点必须在图纸内。可选 brush 为线宽 1、2、4 或 8（默认 1），从落点向右下扩展 N×N（与 draw_pixels 足迹一致），坐标不必对齐网格。返回 8 倍放大 PNG，可据预览继续修改和调整。"
     )]
     async fn draw_line(
         &self,
@@ -488,7 +488,7 @@ impl PixelDraw {
     }
 
     #[tool(
-        description = "画圆。仅用于大面积绘制，细节请尽量用像素绘制。圆心 (cx,cy) 与半径 radius（0 为单点）；圆心必须在图纸内，半径超出部分自动裁剪。fill=true 填充，fill=false 描边。描边可用 brush（1/2/4/8，默认 1）加粗；填充忽略 brush。返回 8 倍放大 PNG，可据预览继续修改和调整。"
+        description = "画圆。仅用于大面积绘制，细节请尽量用像素绘制。圆心 (cx,cy) 与半径 radius（0 为单点）；圆心必须在图纸内，半径超出部分自动裁剪（超过 256 按 256）。fill=true 填充，fill=false 描边。描边可用 brush（1/2/4/8，默认 1）加粗；填充忽略 brush。返回 8 倍放大 PNG，可据预览继续修改和调整。"
     )]
     async fn draw_circle(
         &self,
@@ -509,7 +509,7 @@ impl PixelDraw {
     }
 
     #[tool(
-        description = "画椭圆。仅用于大面积绘制，细节请尽量用像素绘制。圆心 (cx,cy)，水平半径 rx、垂直半径 ry（可为 0，退化为线或点）；圆心必须在图纸内，越界部分裁剪。fill=true 填充，fill=false 描边。描边可用 brush（1/2/4/8，默认 1）加粗；填充忽略 brush。返回 8 倍放大 PNG，可据预览继续修改和调整。"
+        description = "画椭圆。仅用于大面积绘制，细节请尽量用像素绘制。圆心 (cx,cy)，水平半径 rx、垂直半径 ry（可为 0，退化为线或点）；圆心必须在图纸内，越界部分裁剪（轴长超过 256 按 256）。fill=true 填充，fill=false 描边。描边可用 brush（1/2/4/8，默认 1）加粗；填充忽略 brush。返回 8 倍放大 PNG，可据预览继续修改和调整。"
     )]
     async fn draw_ellipse(
         &self,
@@ -531,7 +531,7 @@ impl PixelDraw {
     }
 
     #[tool(
-        description = "画曲线。仅用于大面积绘制，细节请尽量用像素绘制。points 为 [x,y] 路径点列表，至少 2 个点且都必须在图纸内：2 点画直线；3 点为二次贝塞尔（中间点是控制点）；4 点为三次贝塞尔（中间两点是控制点）；5 点及以上为过点平滑样条（Catmull-Rom，曲线经过每一个点）。可选 brush 为线宽 1/2/4/8（默认 1），以落点为中心加粗，坐标不必对齐网格。返回 8 倍放大 PNG，可据预览继续修改和调整。"
+        description = "画曲线。仅用于大面积绘制，细节请尽量用像素绘制。points 为 [x,y] 路径点列表，至少 2 个点且都必须在图纸内：2 点画直线；3 点为二次贝塞尔（中间点是控制点）；4 点为三次贝塞尔（中间两点是控制点）；5 点及以上为过点平滑样条（Catmull-Rom，曲线经过每一个点）。可选 brush 为线宽 1/2/4/8（默认 1），从落点向右下扩展 N×N（与 draw_pixels 一致），坐标不必对齐网格。返回 8 倍放大 PNG，可据预览继续修改和调整。"
     )]
     async fn draw_curve(
         &self,
@@ -588,7 +588,7 @@ impl PixelDraw {
     }
 
     #[tool(
-        description = "油漆桶：仅用于大面积填充，细节请尽量用像素绘制。从种子点 (x,y) 四连通填充与该点当前色号相同的区域，替换为 color。空格与 H2 白豆分开处理。种子点必须在图纸内。若目标色号与种子色号相同则不改动。返回 8 倍放大 PNG。"
+        description = "油漆桶：仅用于大面积填充，细节请尽量用像素绘制。从种子点 (x,y) 四连通填充与该点当前色号相同的区域，替换为 color（可用 - 清为空格）。空格与 H2 白豆分开处理。种子点必须在图纸内。若目标色号与种子色号相同则不改动。返回 8 倍放大 PNG。"
     )]
     async fn flood_fill(
         &self,
@@ -742,7 +742,7 @@ impl ServerHandler for PixelDraw {
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(
-                "PixelDraw：用强约束像素指令绘图，不要直接文生图。尽量使用像素绘制；其他图元仅用于大面积绘制。多笔绘制请一次调用 draw_batch（ops 有序数组，原子执行，只回最终预览）；单笔可用 draw_line / draw_rect / draw_triangle / draw_circle / draw_ellipse / draw_curve / flood_fill / draw_pixels。禁止并行调用多个绘制工具，会打乱顺序。流程：create_canvas(width, height, palette?, background?) 建图并锁定色表 → draw_batch 或单笔工具作画 → 看 8 倍预览继续修改调整（画错可用 undo 撤回）→ save_image 保存。矩形、三角形、圆、椭圆用 fill=true|false 区分填充/描边；直线、曲线与描边可用 brush=1|2|4|8 控制线宽（不要求网格对齐）。draw_curve 的 points 为 [x,y] 列表：2 点直线、3 点二次贝塞尔、4 点三次贝塞尔、≥5 点过点平滑样条。draw_pixels 用 - 清除为空格（不是 H2 白豆）；background 可选 white（默认）或 empty。list_colors 只在需要查色时调用。颜色只用当前模式的中文名或 MARD 色号。save_image 的 output 可选 pixel（默认 8 倍 PNG）、pattern（拼豆图纸）或 both；不覆盖已有文件。",
+                "PixelDraw：用强约束像素指令绘图，不要直接文生图。尽量使用像素绘制；其他图元仅用于大面积绘制。多笔绘制请一次调用 draw_batch（ops 有序数组，原子执行，只回最终预览）；单笔可用 draw_line / draw_rect / draw_triangle / draw_circle / draw_ellipse / draw_curve / flood_fill / draw_pixels。禁止并行调用多个绘制工具，会打乱顺序。流程：create_canvas(width, height, palette?, background?) 建图并锁定色表 → draw_batch 或单笔工具作画 → 看 8 倍预览继续修改调整（画错可用 undo 撤回）→ save_image 保存。矩形、三角形、圆、椭圆用 fill=true|false 区分填充/描边；直线、曲线与描边可用 brush=1|2|4|8 控制线宽（从落点向右下扩展 N×N，与 draw_pixels 足迹一致）。draw_curve 的 points 为 [x,y] 列表：2 点直线、3 点二次贝塞尔、4 点三次贝塞尔、≥5 点过点平滑样条。draw_pixels 与 flood_fill 可用 - 清除为空格（不是 H2 白豆）；background 可选 white（默认）或 empty。list_colors 只在需要查色时调用。颜色只用当前模式的中文名或 MARD 色号。save_image 的 output 可选 pixel（默认 8 倍 PNG）、pattern（拼豆图纸）或 both；不覆盖已有文件。",
             )
     }
 }

@@ -16,7 +16,7 @@
    - `draw_circle({ cx, cy, radius, color, fill, brush? })` 圆；`fill` 同上
    - `draw_ellipse({ cx, cy, rx, ry, color, fill, brush? })` 椭圆；`fill` 同上
    - `draw_curve({ points: [[x,y], ...], color, brush? })` 曲线；2 点直线、3 点二次贝塞尔、4 点三次贝塞尔、≥5 点过点平滑样条（Catmull-Rom）
-   - `flood_fill({ x, y, color })` 油漆桶，四连通替换种子点同色号区域；空格与 H2 白豆分开处理
+   - `flood_fill({ x, y, color })` 油漆桶，四连通替换种子点同色号区域；空格与 H2 白豆分开处理；`color` 可用 `-` 清为空格
    - `draw_pixels({ pixels: "0 0 正红 0 1 纯黑", brush? })` 散点/方块笔刷落点；用 `-` 清除为空格（不是 H2 白豆）
    - `draw_batch({ ops })` 多笔有序批量；`ops` 项用 `type` 区分 line/rect/triangle/circle/ellipse/curve/flood_fill/pixels
 3. `list_colors` 只在需要查色时调用，**不是**作画必经步骤。
@@ -28,11 +28,12 @@
 坐标系：`(0, 0)` 为左上角，`x` 向右，`y` 向下。
 
 **画笔大小 `brush`** 只能是 `1`、`2`、`4`、`8`，**默认 `1`**：
-- 对 `draw_line`、`draw_curve` 与描边模式的矩形/圆/椭圆：表示线宽，坐标**不必**对齐网格，以落点为中心扩展 `N×N`。
-- 对 `draw_pixels`：在落点 `(x, y)` 涂满左上对齐的 `N×N` 方块，且 `x`、`y` 必须是 `N` 的倍数（不吸附）。例如 `brush: 2` 只能落在 `0,2,4,6…`。
+- 所有粗笔刷都从落点 `(x, y)` 向右下涂满 `N×N` 方块（与 `draw_pixels` 足迹一致）：同一坐标同一 `brush` 覆盖相同格子。
+- 对 `draw_line`、`draw_curve` 与描边模式的矩形/圆/椭圆：表示线宽，坐标**不必**对齐网格，越界部分裁剪。
+- 对 `draw_pixels`：`x`、`y` 必须是 `N` 的倍数（不吸附）。例如 `brush: 2` 只能落在 `0,2,4,6…`。
 - 填充模式与 `flood_fill` 忽略 `brush`。
 
-颜色非法时整批拒绝。图元端点/圆心/曲线路径点/种子点越界报错；圆/椭圆半径可超出图纸，超出部分自动裁剪。`draw_pixels` 笔刷未对齐或方块出界时整批拒绝。
+颜色非法时整批拒绝。图元端点/圆心/曲线路径点/种子点越界报错；圆/椭圆半径可超出图纸，超出部分自动裁剪（半径/轴长超过 256 时按 256 计算）。`draw_pixels` 笔刷未对齐或方块出界时整批拒绝。
 
 ## 24 色表
 

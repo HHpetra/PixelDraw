@@ -299,7 +299,7 @@ fn plan_layout(grid_w: u32, grid_h: u32, cell: u32, legend_count: usize) -> Shee
     let legend_rows = if legend_count == 0 {
         0
     } else {
-        (legend_count as u32 + per_row - 1) / per_row
+        (legend_count as u32).div_ceil(per_row)
     };
     let legend_block_h = if legend_rows == 0 {
         0
@@ -476,6 +476,7 @@ fn blit_logo(image: &mut RgbImage, logo: &LogoRgba, dest_x: u32, dest_y: u32, de
     dest_w
 }
 
+#[allow(clippy::too_many_arguments)] // Mirrors the sheet layout parameters.
 fn draw_header(
     image: &mut RgbImage,
     font: &Font,
@@ -516,6 +517,7 @@ fn draw_header(
     );
 }
 
+#[allow(clippy::too_many_arguments)] // Text drawing needs font, cache, geometry and ink.
 fn draw_text_centered(
     image: &mut RgbImage,
     font: &Font,
@@ -539,6 +541,7 @@ fn draw_text_centered(
     );
 }
 
+#[allow(clippy::too_many_arguments)] // Text drawing needs font, cache, geometry and ink.
 fn draw_text(
     image: &mut RgbImage,
     font: &Font,
@@ -587,8 +590,8 @@ fn blend_rgba(image: &mut RgbImage, x: u32, y: u32, src: [u8; 4]) {
     }
     let inv = 1.0 - a;
     let pixel = image.get_pixel_mut(x, y);
-    for i in 0..3 {
-        pixel.0[i] = (f32::from(src[i]) * a + f32::from(pixel.0[i]) * inv).round() as u8;
+    for (i, src_c) in src.iter().take(3).enumerate() {
+        pixel.0[i] = (f32::from(*src_c) * a + f32::from(pixel.0[i]) * inv).round() as u8;
     }
 }
 
@@ -603,8 +606,8 @@ fn blend(image: &mut RgbImage, x: i32, y: i32, rgb: [u8; 3], cover: u8) {
     let a = f32::from(cover) / 255.0;
     let inv = 1.0 - a;
     let pixel = image.get_pixel_mut(x, y);
-    for i in 0..3 {
-        pixel.0[i] = (f32::from(rgb[i]) * a + f32::from(pixel.0[i]) * inv).round() as u8;
+    for (i, rgb_c) in rgb.iter().enumerate() {
+        pixel.0[i] = (f32::from(*rgb_c) * a + f32::from(pixel.0[i]) * inv).round() as u8;
     }
 }
 

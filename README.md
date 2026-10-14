@@ -202,20 +202,22 @@ Each file is saved atomically. `both` checks both names before writing, so exist
 | `draw_circle` | Circle; `fill` selects filled vs stroked, stroke uses `brush` width. |
 | `draw_ellipse` | Ellipse; `fill` selects filled vs stroked, stroke uses `brush` width. |
 | `draw_curve` | Curve through `[x,y]` points: 2=line, 3=quadratic Bezier, 4=cubic Bezier, 5+=Catmull-Rom through every point. |
-| `flood_fill` | Four-connected fill of the seed's current bead code; empty cells are distinct from H2 white beads. |
+| `flood_fill` | Four-connected fill of the seed's current bead code; empty cells are distinct from H2 white beads. Use `-` to clear a region back to empty. |
 | `draw_batch` | Ordered atomic batch; any failure rejects the whole batch; one final preview and one undo step. |
 | `draw_pixels` | Whitespace-separated `x y color` triples; `-` clears a cell. |
 | `undo` | Reverses recent drawing steps (`steps` optional, default 1). Successful draws are one step each; `draw_batch` is one step; `create_canvas` clears history. |
 | `save_image` | Exports `pixel` (default), `pattern`, or `both` as PNG without overwriting existing files. |
 
 - Prefer `draw_batch` for multi-stroke work; do not call drawing tools in parallel. Review the preview and keep adjusting.
-- Stroke/line `brush` sizes are 1, 2, 4 or 8, expanded around each raster point.
+- Stroke/line `brush` sizes are 1, 2, 4 or 8, expanded as an `N×N` square
+  toward the bottom-right from each raster point (same footprint as `draw_pixels`).
   Fills and flood fill ignore brush size.
 - For `draw_pixels`, brush positions must be multiples of the brush size, and
   the entire square must fit inside the canvas.
 - Invalid drawing batches leave the canvas unchanged. Repeated positions
   are applied in order. Colors use MARD codes or the active palette's Chinese names.
-- Circle/ellipse radii may extend past the canvas and are clipped. Line ends,
+- Circle/ellipse radii may extend past the canvas and are clipped (values above
+  256 are treated as 256). Line ends,
   curve points, circle centers, and flood-fill seeds must stay inside the canvas.
 - Only one canvas is held in memory per server instance. Restarting loses
   unsaved work. Undo is in-memory only (up to 64 steps) and is cleared by

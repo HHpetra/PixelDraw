@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Unify thick-brush footprints: stroke tools and `draw_pixels` now stamp the same top-left `N×N` block at the same coordinates.
+- Cap circle/ellipse radii at 256 before rasterization (prevents huge allocations, hangs, and `u32`→`i32` wrap).
+- Skip undo history for draw calls that write zero pixels (e.g. fully clipped strokes).
+- Report unique painted cell counts instead of `stamps × brush²`.
+- `flood_fill` accepts `-` to clear a region back to empty cells.
+
 ## 0.2.0
 
 - `draw_curve`: quadratic/cubic Bezier and Catmull-Rom smooth curves through waypoints.
