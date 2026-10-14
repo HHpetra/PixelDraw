@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Symmetric Bresenham lines: A→B and B→A always cover the same pixels (no direction-dependent jogs on shallow slopes).
+- Circle/ellipse strokes are now the 1px contour of the matching fill (hollow, gap-free, consistent with `fill=true`).
 - Unify thick-brush footprints: stroke tools and `draw_pixels` now stamp the same top-left `N×N` block at the same coordinates.
 - Cap circle/ellipse radii at 256 before rasterization (prevents huge allocations, hangs, and `u32`→`i32` wrap).
 - Skip undo history for draw calls that write zero pixels (e.g. fully clipped strokes).

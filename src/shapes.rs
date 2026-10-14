@@ -2,18 +2,27 @@
 //! Coordinates are signed so thick brushes can expand past the origin;
 //! the canvas clips when stamping.
 
+/// Integer Bresenham line. Same endpoints always cover the same pixels,
+/// regardless of draw direction (A→B equals reversed B→A).
 pub fn line_points(x0: i32, y0: i32, x1: i32, y1: i32) -> Vec<(i32, i32)> {
+    // Canonicalize start/end so tie-breaking does not depend on call order.
+    let reverse = (x1, y1) < (x0, y0);
+    let (ax, ay, bx, by) = if reverse {
+        (x1, y1, x0, y0)
+    } else {
+        (x0, y0, x1, y1)
+    };
     let mut points = Vec::new();
-    let mut x = x0;
-    let mut y = y0;
-    let dx = (x1 - x0).abs();
-    let dy = -(y1 - y0).abs();
-    let sx = if x0 < x1 { 1 } else { -1 };
-    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut x = ax;
+    let mut y = ay;
+    let dx = (bx - ax).abs();
+    let dy = -(by - ay).abs();
+    let sx = if ax < bx { 1 } else { -1 };
+    let sy = if ay < by { 1 } else { -1 };
     let mut err = dx + dy;
     loop {
         points.push((x, y));
-        if x == x1 && y == y1 {
+        if x == bx && y == by {
             break;
         }
         let e2 = 2 * err;
@@ -25,6 +34,9 @@ pub fn line_points(x0: i32, y0: i32, x1: i32, y1: i32) -> Vec<(i32, i32)> {
             err += dx;
             y += sy;
         }
+    }
+    if reverse {
+        points.reverse();
     }
     points
 }
@@ -68,34 +80,28 @@ pub fn rect_stroke_points(x0: i32, y0: i32, x1: i32, y1: i32) -> Vec<(i32, i32)>
     points
 }
 
+/// 1px outer contour of a filled cell set (cells with a 4-neighbor outside).
+/// Used so shape strokes stay hollow, thin, and consistent with their fill.
+fn outline_cells(fill: &[(i32, i32)]) -> Vec<(i32, i32)> {
+    use std::collections::HashSet;
+    let set: HashSet<(i32, i32)> = fill.iter().copied().collect();
+    fill.iter()
+        .copied()
+        .filter(|&(x, y)| {
+            !set.contains(&(x + 1, y))
+                || !set.contains(&(x - 1, y))
+                || !set.contains(&(x, y + 1))
+                || !set.contains(&(x, y - 1))
+        })
+        .collect()
+}
+
 pub fn circle_stroke_points(cx: i32, cy: i32, r: i32) -> Vec<(i32, i32)> {
     if r <= 0 {
         return vec![(cx, cy)];
     }
-    let mut points = Vec::new();
-    let mut x = 0;
-    let mut y = r;
-    let mut d = 1 - r;
-    while x <= y {
-        points.extend([
-            (cx + x, cy + y),
-            (cx - x, cy + y),
-            (cx + x, cy - y),
-            (cx - x, cy - y),
-            (cx + y, cy + x),
-            (cx - y, cy + x),
-            (cx + y, cy - x),
-            (cx - y, cy - x),
-        ]);
-        if d < 0 {
-            d += 2 * x + 3;
-        } else {
-            d += 2 * (x - y) + 5;
-            y -= 1;
-        }
-        x += 1;
-    }
-    points
+    // Outline of the filled disk: thin ring, no gaps, matches fill radius.
+    outline_cells(&circle_fill_points(cx, cy, r))
 }
 
 pub fn circle_fill_points(cx: i32, cy: i32, r: i32) -> Vec<(i32, i32)> {
@@ -124,27 +130,9 @@ pub fn ellipse_stroke_points(cx: i32, cy: i32, rx: i32, ry: i32) -> Vec<(i32, i3
     if ry <= 0 {
         return line_points(cx - rx, cy, cx + rx, cy);
     }
-    let mut points = Vec::new();
-    // Walk x along the implicit ellipse equation and emit the nearest integer y.
-    let mut x = -rx;
-    let rx2 = (rx as i64) * (rx as i64);
-    let ry2 = (ry as i64) * (ry as i64);
-    while x <= rx {
-        let yy = ((ry2 * (rx2 - (x as i64) * (x as i64))) as f64 / rx2 as f64).sqrt();
-        let y_up = (yy.round() as i32).clamp(0, ry);
-        points.push((cx + x, cy + y_up));
-        points.push((cx + x, cy - y_up));
-        x += 1;
-    }
-    let mut y = -ry;
-    while y <= ry {
-        let xx = ((rx2 * (ry2 - (y as i64) * (y as i64))) as f64 / ry2 as f64).sqrt();
-        let x_right = (xx.round() as i32).clamp(0, rx);
-        points.push((cx + x_right, cy + y));
-        points.push((cx - x_right, cy + y));
-        y += 1;
-    }
-    points
+    // Same contour approach as the circle: keeps the ring gap-free and
+    // on the same boundary as `ellipse_fill_points`.
+    outline_cells(&ellipse_fill_points(cx, cy, rx, ry))
 }
 
 fn edge(ax: i32, ay: i32, bx: i32, by: i32, px: i32, py: i32) -> i64 {
@@ -608,6 +596,32 @@ mod tests {
     }
 
     #[test]
+    fn lines_are_direction_independent() {
+        // Drawing A→B must cover exactly the same pixels as B→A.
+        let pairs = [
+            ((0, 0), (8, 1)),
+            ((0, 0), (4, 1)),
+            ((0, 0), (5, 2)),
+            ((0, 0), (15, 2)),
+            ((0, 0), (7, 0)),
+            ((0, 0), (0, 7)),
+            ((1, 1), (6, 6)),
+            ((6, 1), (1, 6)),
+            ((2, 10), (11, 3)),
+            ((0, 0), (1, 8)),
+        ];
+        for &(a, b) in &pairs {
+            let forward = line_points(a.0, a.1, b.0, b.1);
+            let mut backward = line_points(b.0, b.1, a.0, a.1);
+            backward.reverse();
+            assert_eq!(
+                forward, backward,
+                "direction-dependent raster for {a:?}->{b:?}"
+            );
+        }
+    }
+
+    #[test]
     fn circle_stroke_is_a_thin_ring_not_a_disk() {
         let r = 5;
         let stroke = unique(&circle_stroke_points(8, 8, r));
@@ -640,6 +654,12 @@ mod tests {
                 "stroke cell ({x},{y}) is off the rim (dist²={dist2})"
             );
         }
+        // Stroke is the contour of the same fill: never outside the disk.
+        assert!(
+            stroke.is_subset(&fill),
+            "stroke cells outside fill: {:?}",
+            stroke.difference(&fill).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -652,6 +672,11 @@ mod tests {
         let fill = unique(&ellipse_fill_points(cx, cy, rx, ry));
         assert!(fill.contains(&(cx, cy)));
         assert!(stroke.len() * 2 < fill.len());
+        assert!(
+            stroke.is_subset(&fill),
+            "ellipse stroke cells outside fill: {:?}",
+            stroke.difference(&fill).collect::<Vec<_>>()
+        );
         // Rim cells stay near the ellipse boundary (normalized distance ≈ 1).
         for &(x, y) in &stroke {
             let dx = (x - cx) as f64 / rx as f64;

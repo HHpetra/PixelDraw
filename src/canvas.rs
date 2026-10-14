@@ -1547,4 +1547,30 @@ mod tests {
         assert_eq!(canvas.codes()[0], Some("H2"));
         assert_eq!(canvas.codes()[2 * 12 + 2], Some("H7"));
     }
+
+    #[test]
+    fn reversed_lines_paint_the_same_cells() {
+        // Shallow slopes used to differ when drawn end-to-start.
+        let pairs = [
+            ((0, 0), (15, 2)),
+            ((0, 0), (8, 1)),
+            ((1, 12), (14, 3)),
+            ((15, 15), (0, 7)),
+        ];
+        for &(a, b) in &pairs {
+            let mut forward = Canvas::new(16, 16, PaletteMode::Colors24).unwrap();
+            forward
+                .paint_line(a.0, a.1, b.0, b.1, "纯黑", BrushSize::One)
+                .unwrap();
+            let mut backward = Canvas::new(16, 16, PaletteMode::Colors24).unwrap();
+            backward
+                .paint_line(b.0, b.1, a.0, a.1, "纯黑", BrushSize::One)
+                .unwrap();
+            assert_eq!(
+                forward.pixels, backward.pixels,
+                "direction changed the painted cells for {a:?}->{b:?}"
+            );
+            assert_eq!(forward.codes(), backward.codes());
+        }
+    }
 }
