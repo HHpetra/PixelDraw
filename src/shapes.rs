@@ -234,12 +234,7 @@ pub fn quadratic_bezier_points(
     y1: i32,
 ) -> Vec<(i32, i32)> {
     let (x0, y0, cx, cy, x1, y1) = (
-        x0 as f64,
-        y0 as f64,
-        cx as f64,
-        cy as f64,
-        x1 as f64,
-        y1 as f64,
+        x0 as f64, y0 as f64, cx as f64, cy as f64, x1 as f64, y1 as f64,
     );
     let span = ((x1 - x0).abs() + (y1 - y0).abs() + (cx - x0).abs() + (cy - y0).abs()) as i32;
     let steps = (span * 4).clamp(8, 4096) as usize;
@@ -443,9 +438,9 @@ mod tests {
 
     /// Consecutive samples may sit on the same pixel, but never jump.
     fn is_8_connected_path(points: &[(i32, i32)]) -> bool {
-        points.windows(2).all(|w| {
-            (w[0].0 - w[1].0).abs() <= 1 && (w[0].1 - w[1].1).abs() <= 1
-        })
+        points
+            .windows(2)
+            .all(|w| (w[0].0 - w[1].0).abs() <= 1 && (w[0].1 - w[1].1).abs() <= 1)
     }
 
     /// Every cell is reachable from an arbitrary start via 8-neighbors.
@@ -507,9 +502,17 @@ mod tests {
         let count_y = ys.len();
         ys.dedup();
         if dx >= dy {
-            assert_eq!(xs.len(), count, "two cells share a column (thick) {x0},{y0}->{x1},{y1}");
+            assert_eq!(
+                xs.len(),
+                count,
+                "two cells share a column (thick) {x0},{y0}->{x1},{y1}"
+            );
         } else {
-            assert_eq!(ys.len(), count_y, "two cells share a row (thick) {x0},{y0}->{x1},{y1}");
+            assert_eq!(
+                ys.len(),
+                count_y,
+                "two cells share a row (thick) {x0},{y0}->{x1},{y1}"
+            );
         }
     }
 
@@ -576,7 +579,10 @@ mod tests {
         let stroke = unique(&rect_stroke_points(1, 1, 6, 5));
         for y in 2..5 {
             for x in 2..6 {
-                assert!(!stroke.contains(&(x, y)), "stroke leaked into interior ({x},{y})");
+                assert!(
+                    !stroke.contains(&(x, y)),
+                    "stroke leaked into interior ({x},{y})"
+                );
             }
         }
         for x in 1..=6 {
@@ -588,7 +594,11 @@ mod tests {
             assert!(stroke.contains(&(6, y)), "missing right edge y={y}");
         }
         // 1px border of a 6×5 block: 2w + 2h − 4 = 18 cells.
-        assert_eq!(stroke.len(), 2 * 6 + 2 * 5 - 4, "stroke thicker or thinner than a 1px border");
+        assert_eq!(
+            stroke.len(),
+            2 * 6 + 2 * 5 - 4,
+            "stroke thicker or thinner than a 1px border"
+        );
 
         let fill = unique(&rect_fill_points(1, 1, 6, 5));
         assert_eq!(fill.len(), 6 * 5);
@@ -667,7 +677,10 @@ mod tests {
         let (cx, cy, rx, ry) = (10, 8, 7, 4);
         let stroke = unique(&ellipse_stroke_points(cx, cy, rx, ry));
         assert!(!stroke.contains(&(cx, cy)), "ellipse stroke filled center");
-        assert!(!stroke.contains(&(cx, cy + 1)), "ellipse stroke filled interior");
+        assert!(
+            !stroke.contains(&(cx, cy + 1)),
+            "ellipse stroke filled interior"
+        );
         assert!(is_8_connected_region(&stroke), "ellipse ring has gaps");
         let fill = unique(&ellipse_fill_points(cx, cy, rx, ry));
         assert!(fill.contains(&(cx, cy)));

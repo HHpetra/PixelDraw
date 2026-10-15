@@ -1161,7 +1161,15 @@ mod tests {
 
         let mut stroke = Canvas::new(8, 8, PaletteMode::Colors24).unwrap();
         let w = stroke
-            .paint_ellipse(4, 4, 3_000_000_000, 3_000_000_000, "纯黑", true, BrushSize::One)
+            .paint_ellipse(
+                4,
+                4,
+                3_000_000_000,
+                3_000_000_000,
+                "纯黑",
+                true,
+                BrushSize::One,
+            )
             .unwrap();
         assert!(w > 0);
         assert_eq!(stroke.pixels[4 * 8 + 4], [0, 0, 0]);
@@ -1378,13 +1386,21 @@ mod tests {
             xs.sort_unstable();
             let n = xs.len();
             xs.dedup();
-            assert_eq!(xs.len(), n, "line {x0},{y0}->{x1},{y1} is thicker than 1px in y");
+            assert_eq!(
+                xs.len(),
+                n,
+                "line {x0},{y0}->{x1},{y1} is thicker than 1px in y"
+            );
         } else {
             let mut ys: Vec<u32> = cells.iter().map(|c| c.1).collect();
             ys.sort_unstable();
             let n = ys.len();
             ys.dedup();
-            assert_eq!(ys.len(), n, "line {x0},{y0}->{x1},{y1} is thicker than 1px in x");
+            assert_eq!(
+                ys.len(),
+                n,
+                "line {x0},{y0}->{x1},{y1} is thicker than 1px in x"
+            );
         }
     }
 
@@ -1426,7 +1442,10 @@ mod tests {
             .unwrap();
         let cells = cells_with(&canvas, black());
         assert_eq!(cells.len(), 11);
-        assert!(cells.iter().all(|&(_, y)| y == 8), "vertical bleed: {cells:?}");
+        assert!(
+            cells.iter().all(|&(_, y)| y == 8),
+            "vertical bleed: {cells:?}"
+        );
     }
 
     #[test]
@@ -1437,7 +1456,10 @@ mod tests {
             .unwrap();
         let cells = cells_with(&canvas, black());
         assert_eq!(cells.len(), 11);
-        assert!(cells.iter().all(|&(x, _)| x == 6), "horizontal bleed: {cells:?}");
+        assert!(
+            cells.iter().all(|&(x, _)| x == 6),
+            "horizontal bleed: {cells:?}"
+        );
     }
 
     #[test]
@@ -1465,8 +1487,14 @@ mod tests {
             .paint_circle(8, 8, 5, "纯黑", false, BrushSize::One)
             .unwrap();
         let circle_cells = cells_with(&circle, black());
-        assert!(!circle_cells.contains(&(8, 8)), "circle stroke filled center");
-        assert!(!circle_cells.contains(&(8, 9)), "circle stroke filled interior");
+        assert!(
+            !circle_cells.contains(&(8, 8)),
+            "circle stroke filled center"
+        );
+        assert!(
+            !circle_cells.contains(&(8, 9)),
+            "circle stroke filled interior"
+        );
         assert!(is_8_connected_region(&circle_cells), "circle ring has gaps");
 
         let mut ellipse = Canvas::new(16, 16, PaletteMode::Colors24).unwrap();
@@ -1474,7 +1502,10 @@ mod tests {
             .paint_ellipse(8, 8, 6, 3, "纯黑", false, BrushSize::One)
             .unwrap();
         let ellipse_cells = cells_with(&ellipse, black());
-        assert!(!ellipse_cells.contains(&(8, 8)), "ellipse stroke filled center");
+        assert!(
+            !ellipse_cells.contains(&(8, 8)),
+            "ellipse stroke filled center"
+        );
         assert!(is_8_connected_region(&ellipse_cells));
 
         let mut triangle = Canvas::new(16, 16, PaletteMode::Colors24).unwrap();
@@ -1482,7 +1513,10 @@ mod tests {
             .paint_triangle(2, 2, 13, 2, 2, 13, "纯黑", false, BrushSize::One)
             .unwrap();
         let tri_cells = cells_with(&triangle, black());
-        assert!(!tri_cells.contains(&(4, 4)), "triangle stroke filled interior");
+        assert!(
+            !tri_cells.contains(&(4, 4)),
+            "triangle stroke filled interior"
+        );
         assert!(is_8_connected_region(&tri_cells));
     }
 
@@ -1494,7 +1528,11 @@ mod tests {
             .unwrap();
         let cells = cells_with(&canvas, black());
         assert_eq!(cells.len(), 8 * 7);
-        assert!(cells.iter().all(|&(x, y)| (3..=10).contains(&x) && (3..=9).contains(&y)));
+        assert!(
+            cells
+                .iter()
+                .all(|&(x, y)| (3..=10).contains(&x) && (3..=9).contains(&y))
+        );
 
         let mut circle = Canvas::new(16, 16, PaletteMode::Colors24).unwrap();
         circle
@@ -1503,7 +1541,10 @@ mod tests {
         let disk = cells_with(&circle, black());
         assert!(disk.contains(&(8, 8)));
         assert!(disk.len() > 20);
-        assert!(disk.iter().all(|&(x, y)| x.abs_diff(8) <= 4 && y.abs_diff(8) <= 4));
+        assert!(
+            disk.iter()
+                .all(|&(x, y)| x.abs_diff(8) <= 4 && y.abs_diff(8) <= 4)
+        );
     }
 
     #[test]
@@ -1515,12 +1556,13 @@ mod tests {
         ];
         for points in cases {
             let mut canvas = Canvas::new(16, 16, PaletteMode::Colors24).unwrap();
-            canvas
-                .paint_curve(points, "纯黑", BrushSize::One)
-                .unwrap();
+            canvas.paint_curve(points, "纯黑", BrushSize::One).unwrap();
             let cells = cells_with(&canvas, black());
             assert!(cells.contains(&points[0]), "curve missing start");
-            assert!(cells.contains(&points[points.len() - 1]), "curve missing end");
+            assert!(
+                cells.contains(&points[points.len() - 1]),
+                "curve missing end"
+            );
             assert!(
                 is_8_connected_region(&cells),
                 "curve {points:?} has a gap ({ } cells)",
@@ -1542,7 +1584,11 @@ mod tests {
         // Interior of 8×8 border is 6×6 = 36 cells.
         assert_eq!(filled, 36);
         assert_eq!(red_cells.len(), 36);
-        assert!(red_cells.iter().all(|&(x, y)| (3..=8).contains(&x) && (3..=8).contains(&y)));
+        assert!(
+            red_cells
+                .iter()
+                .all(|&(x, y)| (3..=8).contains(&x) && (3..=8).contains(&y))
+        );
         // Exterior white and the black border stay untouched.
         assert_eq!(canvas.codes()[0], Some("H2"));
         assert_eq!(canvas.codes()[2 * 12 + 2], Some("H7"));
