@@ -1,20 +1,22 @@
 # Changelog
 
-## Unreleased
-
-- Symmetric Bresenham lines: A→B and B→A always cover the same pixels (no direction-dependent jogs on shallow slopes).
-- Circle/ellipse strokes are now the 1px contour of the matching fill (hollow, gap-free, consistent with `fill=true`).
-- Unify thick-brush footprints: stroke tools and `draw_pixels` now stamp the same top-left `N×N` block at the same coordinates.
-- Cap circle/ellipse radii at 256 before rasterization (prevents huge allocations, hangs, and `u32`→`i32` wrap).
-- Skip undo history for draw calls that write zero pixels (e.g. fully clipped strokes).
-- Report unique painted cell counts instead of `stamps × brush²`.
-- `flood_fill` accepts `-` to clear a region back to empty cells.
-
 ## 0.2.0
 
+- Shape tools: `draw_line`, `draw_rect`, `draw_triangle`, `draw_circle`, `draw_ellipse`, and `flood_fill` for large-area fills and outlines.
+- `draw_batch`: submit multiple ordered ops atomically; one final preview and one undo step.
 - `draw_curve`: quadratic/cubic Bezier and Catmull-Rom smooth curves through waypoints.
-- `undo`: reverse recent drawing steps; `draw_batch` collapses to a single undo step.
-- Docs and tool instructions cover curves and undo.
+- `undo`: reverse recent drawing steps.
+- `save_image` `output`: `pixel`, bead `pattern`, or `both` in one call.
+- Pattern sheets: four-side 1-based index bands, per-cell MARD codes, center-out every-10 counting lines, and a color/count legend; sized for Xiaohongshu's 2048px limit with larger codes.
+- Unify MARD color names across the 24/144/221 palettes (BeiYa color card).
+- `background: empty` starts a canvas with no beads; `flood_fill` / `draw_pixels` accept `-` to clear cells.
+- Symmetric Bresenham lines: A→B and B→A always cover the same pixels.
+- Circle/ellipse strokes are the 1px contour of the matching fill (hollow, gap-free).
+- Unify thick-brush footprints: stroke tools and `draw_pixels` stamp the same top-left `N×N` block.
+- Cap circle/ellipse radii at 256 before rasterization.
+- Skip undo history for draw calls that write zero pixels.
+- Report unique painted cell counts instead of `stamps × brush²`.
+- Keep shape and flood-fill bead state in sync (empty cells vs H2 white beads).
 
 ## 0.1.1
 
