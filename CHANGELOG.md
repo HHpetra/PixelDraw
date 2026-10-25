@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1
+
+- Pixel-art circle and ellipse fills use midpoint half-widths so silhouettes stay round at every size: small bead circles keep their classic shape, and large circles / flat ellipses no longer collapse into cones or boxes.
+- Circle and ellipse strokes remain the 1px contour of the matching fill (hollow, gap-free, stroke never outside the fill).
+- Triangle strokes are the contour of the barycentric fill, so acute and flat triangles no longer draw edges outside the painted region.
+- Regression tests lock circle smoothness (monotone silhouette, true equator) and triangle stroke/fill consistency.
+
 ## 0.2.0
 
 - Shape tools: `draw_line`, `draw_rect`, `draw_triangle`, `draw_circle`, `draw_ellipse`, and `flood_fill` for large-area fills and outlines.

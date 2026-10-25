@@ -71,8 +71,8 @@ Windows PowerShell (example after extraction):
 Linux/macOS (substitute the actual extracted directory):
 
 ```sh
-tar -xzf pixeldraw-v0.2.0-aarch64-apple-darwin.tar.gz
-./pixeldraw-v0.2.0-aarch64-apple-darwin/pixeldraw --version
+tar -xzf pixeldraw-v0.2.1-aarch64-apple-darwin.tar.gz
+./pixeldraw-v0.2.1-aarch64-apple-darwin/pixeldraw --version
 ```
 
 Use the executable's **absolute path** in your client's MCP configuration:
