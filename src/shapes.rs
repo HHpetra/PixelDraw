@@ -80,7 +80,7 @@ pub fn rect_stroke_points(x0: i32, y0: i32, x1: i32, y1: i32) -> Vec<(i32, i32)>
     points
 }
 
-/// 1px outer contour of a filled cell set (cells with a 4-neighbor outside).
+/// 1px boundary of a filled cell set (cells with a 4-neighbor outside).
 /// Used so shape strokes stay hollow, thin, and consistent with their fill.
 fn outline_cells(fill: &[(i32, i32)]) -> Vec<(i32, i32)> {
     use std::collections::HashSet;
@@ -96,28 +96,80 @@ fn outline_cells(fill: &[(i32, i32)]) -> Vec<(i32, i32)> {
         .collect()
 }
 
-pub fn circle_stroke_points(cx: i32, cy: i32, r: i32) -> Vec<(i32, i32)> {
-    if r <= 0 {
-        return vec![(cx, cy)];
-    }
-    // Outline of the filled disk: thin ring, no gaps, matches fill radius.
-    outline_cells(&circle_fill_points(cx, cy, r))
-}
-
-pub fn circle_fill_points(cx: i32, cy: i32, r: i32) -> Vec<(i32, i32)> {
-    if r <= 0 {
-        return vec![(cx, cy)];
-    }
-    let mut points = Vec::new();
-    let rr = (r as i64) * (r as i64);
-    for dy in -r..=r {
-        for dx in -r..=r {
-            if (dx as i64) * (dx as i64) + (dy as i64) * (dy as i64) <= rr {
-                points.push((cx + dx, cy + dy));
+/// Fill cells from half-widths `w[dy] = max |dx|` on each row `|dy|`.
+fn fill_from_half_widths(cx: i32, cy: i32, w: &[i32]) -> Vec<(i32, i32)> {
+    let capacity: usize = w
+        .iter()
+        .enumerate()
+        .map(|(dy, &half)| {
+            let width = (2 * half + 1) as usize;
+            if dy == 0 { width } else { width * 2 }
+        })
+        .sum();
+    let mut points = Vec::with_capacity(capacity);
+    for (dy, &half) in w.iter().enumerate() {
+        let dy = dy as i32;
+        for dx in -half..=half {
+            points.push((cx + dx, cy + dy));
+            if dy > 0 {
+                points.push((cx + dx, cy - dy));
             }
         }
     }
     points
+}
+
+/// Largest integer `dx ≥ 0` with `dx² ≤ n / d` (real division; `d > 0`).
+fn floor_sqrt_div(n: i64, d: i64) -> i64 {
+    debug_assert!(d > 0);
+    (n / d).isqrt()
+}
+
+/// Half-widths `w[0..=ry]` of a filled ellipse with semi-axes `rx`/`ry`.
+///
+/// Each row is the cover-rule silhouette clamped to at most 1px outside
+/// the mathematical ellipse: small circles keep the classic bead outline
+/// (r=2 → half-widths 2,2,1) and the true equator, while large or flat
+/// shapes stay elliptical instead of collapsing into a cone or a box.
+/// The pole may therefore step by more than 1 on large radii — that is
+/// the circle tapering, not a quantization glitch.
+fn ellipse_half_widths(rx: i32, ry: i32) -> Vec<i32> {
+    let rx = rx.max(0) as i64;
+    let ry = ry.max(0) as i64;
+    if ry == 0 {
+        return vec![rx as i32];
+    }
+    if rx == 0 {
+        return vec![0; (ry + 1) as usize];
+    }
+    let rx2 = rx * rx;
+    let ry2 = ry * ry;
+    // Cover test with half-pixel axes: (dx/(rx+.5))² + (dy/(ry+.5))² ≤ 1,
+    // cleared of fractions via ×16.
+    let two_rx1 = 2 * rx + 1;
+    let two_ry1 = 2 * ry + 1;
+    let cover_limit = two_rx1 * two_rx1 * two_ry1 * two_ry1;
+    let cover_a = 4 * two_ry1 * two_ry1;
+    let cover_b = 4 * two_rx1 * two_rx1;
+    let mut w = vec![0i32; (ry + 1) as usize];
+    for dy in 0..=ry {
+        let dy2 = dy * dy;
+        // Center inside the true ellipse: dx²·ry² + dy²·rx² ≤ rx²·ry².
+        let analytic_half = floor_sqrt_div(rx2 * (ry2 - dy2), ry2);
+        // Center inside the half-pixel-grown ellipse: cover_a·dx² + cover_b·dy² ≤ cover_limit.
+        let cover_half = floor_sqrt_div(cover_limit - cover_b * dy2, cover_a);
+        w[dy as usize] = cover_half.min(analytic_half + 1) as i32;
+    }
+    w
+}
+
+/// Outline of the filled disk: thin ring, no gaps, matches fill radius.
+pub fn circle_stroke_points(cx: i32, cy: i32, r: i32) -> Vec<(i32, i32)> {
+    ellipse_stroke_points(cx, cy, r, r)
+}
+
+pub fn circle_fill_points(cx: i32, cy: i32, r: i32) -> Vec<(i32, i32)> {
+    ellipse_fill_points(cx, cy, r, r)
 }
 
 pub fn ellipse_stroke_points(cx: i32, cy: i32, rx: i32, ry: i32) -> Vec<(i32, i32)> {
@@ -148,6 +200,24 @@ pub fn triangle_stroke_points(
     x2: i32,
     y2: i32,
 ) -> Vec<(i32, i32)> {
+    // Degenerate (collinear) triangles have no interior — the three edges
+    // already form a thin polyline. Otherwise contour the fill so the ring
+    // always sits on the same boundary as `triangle_fill_points` (Bresenham
+    // edges can fall outside the barycentric fill on acute/flat triangles).
+    if edge(x0, y0, x1, y1, x2, y2) == 0 {
+        return collinear_triangle_edges(x0, y0, x1, y1, x2, y2);
+    }
+    outline_cells(&triangle_fill_points(x0, y0, x1, y1, x2, y2))
+}
+
+fn collinear_triangle_edges(
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    x2: i32,
+    y2: i32,
+) -> Vec<(i32, i32)> {
     let mut points = line_points(x0, y0, x1, y1);
     points.extend(line_points(x1, y1, x2, y2));
     points.extend(line_points(x2, y2, x0, y0));
@@ -164,13 +234,26 @@ pub fn triangle_fill_points(
 ) -> Vec<(i32, i32)> {
     let area = edge(x0, y0, x1, y1, x2, y2);
     if area == 0 {
-        return triangle_stroke_points(x0, y0, x1, y1, x2, y2);
+        return collinear_triangle_edges(x0, y0, x1, y1, x2, y2);
     }
+    // Center-in barycentric pixels alone leave thin triangles as disconnected
+    // islands (a sharp tip can sit two steps away from the rest). The stroke
+    // is the outline of this fill, so those islands become gaps. Span each
+    // row from the leftmost to the rightmost pixel of the barycentric set
+    // and the three Bresenham edges — edges cover every y, and the span
+    // closes the islands without leaving the vertex bounding box.
     let left = x0.min(x1).min(x2);
     let right = x0.max(x1).max(x2);
     let top = y0.min(y1).min(y2);
     let bottom = y0.max(y1).max(y2);
-    let mut points = Vec::new();
+    let rows = (bottom - top + 1) as usize;
+    let mut min_x = vec![i32::MAX; rows];
+    let mut max_x = vec![i32::MIN; rows];
+    let mut cover = |x: i32, y: i32| {
+        let i = (y - top) as usize;
+        min_x[i] = min_x[i].min(x);
+        max_x[i] = max_x[i].max(x);
+    };
     for y in top..=bottom {
         for x in left..=right {
             let w0 = edge(x1, y1, x2, y2, x, y);
@@ -178,8 +261,21 @@ pub fn triangle_fill_points(
             let w2 = edge(x0, y0, x1, y1, x, y);
             let same_sign = (w0 >= 0 && w1 >= 0 && w2 >= 0) || (w0 <= 0 && w1 <= 0 && w2 <= 0);
             if same_sign {
-                points.push((x, y));
+                cover(x, y);
             }
+        }
+    }
+    for (x, y) in line_points(x0, y0, x1, y1)
+        .into_iter()
+        .chain(line_points(x1, y1, x2, y2))
+        .chain(line_points(x2, y2, x0, y0))
+    {
+        cover(x, y);
+    }
+    let mut points = Vec::new();
+    for (i, y) in (top..=bottom).enumerate() {
+        for x in min_x[i]..=max_x[i] {
+            points.push((x, y));
         }
     }
     points
@@ -189,21 +285,13 @@ pub fn ellipse_fill_points(cx: i32, cy: i32, rx: i32, ry: i32) -> Vec<(i32, i32)
     if rx <= 0 && ry <= 0 {
         return vec![(cx, cy)];
     }
-    let mut points = Vec::new();
-    let rx = rx.max(0);
-    let ry = ry.max(0);
-    let rx2 = (rx as i64) * (rx as i64);
-    let ry2 = (ry as i64) * (ry as i64);
-    let denom = (rx2 * ry2).max(1);
-    for dy in -ry..=ry {
-        for dx in -rx..=rx {
-            let lhs = (dx as i64) * (dx as i64) * ry2 + (dy as i64) * (dy as i64) * rx2;
-            if lhs <= denom {
-                points.push((cx + dx, cy + dy));
-            }
-        }
+    if rx <= 0 {
+        return line_points(cx, cy - ry.max(0), cx, cy + ry.max(0));
     }
-    points
+    if ry <= 0 {
+        return line_points(cx - rx, cy, cx + rx, cy);
+    }
+    fill_from_half_widths(cx, cy, &ellipse_half_widths(rx, ry))
 }
 
 /// Connect sampled curve positions with Bresenham lines so short segments stay gap-free.
@@ -334,11 +422,29 @@ pub fn catmull_rom_points(points: &[(i32, i32)]) -> Vec<(i32, i32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     fn sorted(mut points: Vec<(i32, i32)>) -> Vec<(i32, i32)> {
         points.sort_unstable();
         points.dedup();
         points
+    }
+
+    fn unique(points: &[(i32, i32)]) -> HashSet<(i32, i32)> {
+        points.iter().copied().collect()
+    }
+
+    /// Largest filled `x` on row `y` within `0..=max_x` (row half-width).
+    fn row_half_width(fill: &HashSet<(i32, i32)>, y: i32, max_x: i32) -> i32 {
+        (0..=max_x)
+            .filter(|&x| fill.contains(&(x, y)))
+            .max()
+            .expect("row empty")
+    }
+
+    /// Mathematical half-width `floor(sqrt(r² − y²))` of a disk.
+    fn true_circle_half(r: i32, y: i32) -> i32 {
+        (((r * r - y * y) as f64).sqrt().floor() as i32).max(0)
     }
 
     #[test]
@@ -380,6 +486,79 @@ mod tests {
         assert!(fill.contains(&(5, 7)));
         assert!(!fill.contains(&(5, 8)));
         assert_eq!(circle_fill_points(3, 3, 0), vec![(3, 3)]);
+    }
+
+    #[test]
+    fn circle_silhouette_is_round_not_conical() {
+        // Classic small bead circles stay smooth; every size keeps the true
+        // equator, a monotone silhouette, and a half-width within 1px of the
+        // mathematical disk (so large radii cannot turn into a cone).
+        for r in 2..=24 {
+            let fill = unique(&circle_fill_points(0, 0, r));
+            let mut prev_half = i32::MAX;
+            for y in 0..=r {
+                let half = row_half_width(&fill, y, r);
+                assert!(
+                    half <= prev_half,
+                    "r={r} y={y}: silhouette grew {prev_half} -> {half}"
+                );
+                let true_half = true_circle_half(r, y);
+                assert!(
+                    (half - true_half).abs() <= 1,
+                    "r={r} y={y}: half={half} too far from true {true_half}"
+                );
+                prev_half = half;
+            }
+            // Equator reaches the full radius.
+            assert_eq!(
+                row_half_width(&fill, 0, r),
+                r,
+                "r={r} equator not full width"
+            );
+            // Small circles keep a blunt tip (no 1px spike).
+            if (2..=8).contains(&r) {
+                let top_half = row_half_width(&fill, r, r);
+                assert!(top_half >= 1, "r={r} pole too pointy (half={top_half})");
+            }
+        }
+    }
+
+    #[test]
+    fn large_circle_is_not_a_cone() {
+        // A global "drop at most 1 per row" floor would leave a huge blunt
+        // tip on large disks (r=256 → half-width ~100). The fill must stay
+        // within 1px of the true circle instead.
+        for r in [32, 64, 128] {
+            let fill = unique(&circle_fill_points(0, 0, r));
+            let tip = row_half_width(&fill, r, r);
+            assert!(tip <= 2, "r={r} tip half={tip} is conical, not circular");
+            let mid = row_half_width(&fill, r / 2, r);
+            let true_half = true_circle_half(r, r / 2);
+            assert!(
+                (mid - true_half).abs() <= 1,
+                "r={r} at y={}: half={mid} vs true {true_half}",
+                r / 2
+            );
+        }
+    }
+
+    #[test]
+    fn flat_ellipse_is_not_a_rectangle() {
+        // A wide flat ellipse must stay a thin lens, not a filled box.
+        for &(rx, ry) in &[(20, 1), (20, 2), (15, 4), (7, 4)] {
+            let fill = unique(&ellipse_fill_points(0, 0, rx, ry));
+            let mid = row_half_width(&fill, 0, rx);
+            assert_eq!(mid, rx, "{rx}x{ry} equator not full width");
+            let top = row_half_width(&fill, ry, rx);
+            // True ellipse is a single point at the pole (half=0); allow
+            // the 1px bead-art tip at most.
+            assert!(
+                top <= 1,
+                "{rx}x{ry} top half={top} too wide (true tip is 0/1)"
+            );
+            // Not a box: the top row is much narrower than the equator.
+            assert!(top < rx / 2 + 1, "{rx}x{ry} looks rectangular (top={top})");
+        }
     }
 
     #[test]
@@ -434,8 +613,6 @@ mod tests {
 
     // --- Drawing quality: continuity (no gaps) and thinness (no extra bulk) ---
 
-    use std::collections::HashSet;
-
     /// Consecutive samples may sit on the same pixel, but never jump.
     fn is_8_connected_path(points: &[(i32, i32)]) -> bool {
         points
@@ -464,10 +641,6 @@ mod tests {
             }
         }
         seen.len() == cells.len()
-    }
-
-    fn unique(points: &[(i32, i32)]) -> HashSet<(i32, i32)> {
-        points.iter().copied().collect()
     }
 
     /// Bresenham line: endpoints on the path, one cell per major-axis step
@@ -718,6 +891,79 @@ mod tests {
         assert!(fill.contains(&(2, 2)));
         assert!(stroke.is_subset(&fill));
         assert!(fill.len() > stroke.len());
+    }
+
+    #[test]
+    fn triangle_stroke_stays_inside_fill_on_awkward_shapes() {
+        // Bresenham edges can fall outside the barycentric fill on acute and
+        // flat triangles; the stroke must still be the fill's contour.
+        let cases = [
+            (2, 2, 12, 2, 2, 12),
+            (10, 1, 2, 12, 18, 12),
+            (10, 1, 8, 14, 12, 14),
+            (2, 8, 16, 8, 9, 9),
+            (3, 2, 14, 6, 5, 13),
+            (5, 5, 7, 5, 6, 7),
+            (5, 5, 15, 5, 10, 6),
+            (2, 2, 2, 12, 12, 2),
+            // Thin tips used to rasterize as separate islands, so the
+            // outline stroke broke between the base and the tip.
+            (0, 0, 0, 1, 1, 3),
+            (0, 0, 0, 1, 2, 6),
+            (1, 0, 8, 1, 4, 2),
+        ];
+        for &(x0, y0, x1, y1, x2, y2) in &cases {
+            let fill = unique(&triangle_fill_points(x0, y0, x1, y1, x2, y2));
+            let stroke = unique(&triangle_stroke_points(x0, y0, x1, y1, x2, y2));
+            for vertex in [(x0, y0), (x1, y1), (x2, y2)] {
+                assert!(fill.contains(&vertex), "fill missing {vertex:?}");
+                assert!(stroke.contains(&vertex), "stroke missing {vertex:?}");
+            }
+            assert!(
+                stroke.is_subset(&fill),
+                "stroke outside fill for ({x0},{y0})-({x1},{y1})-({x2},{y2}): {:?}",
+                stroke.difference(&fill).collect::<Vec<_>>()
+            );
+            assert!(is_8_connected_region(&fill), "fill has gaps");
+            assert!(is_8_connected_region(&stroke), "stroke has gaps");
+        }
+    }
+
+    #[test]
+    fn every_small_triangle_fill_and_stroke_is_connected() {
+        for x0 in 0..6 {
+            for y0 in 0..6 {
+                for x1 in 0..6 {
+                    for y1 in 0..6 {
+                        for x2 in 0..6 {
+                            for y2 in 0..6 {
+                                let fill = unique(&triangle_fill_points(x0, y0, x1, y1, x2, y2));
+                                let stroke =
+                                    unique(&triangle_stroke_points(x0, y0, x1, y1, x2, y2));
+                                for vertex in [(x0, y0), (x1, y1), (x2, y2)] {
+                                    assert!(
+                                        fill.contains(&vertex),
+                                        "fill dropped {vertex:?} ({x0},{y0})-({x1},{y1})-({x2},{y2})"
+                                    );
+                                    assert!(
+                                        stroke.contains(&vertex),
+                                        "stroke dropped {vertex:?} ({x0},{y0})-({x1},{y1})-({x2},{y2})"
+                                    );
+                                }
+                                assert!(
+                                    stroke.is_subset(&fill) && is_8_connected_region(&stroke),
+                                    "broken stroke ({x0},{y0})-({x1},{y1})-({x2},{y2})"
+                                );
+                                assert!(
+                                    is_8_connected_region(&fill),
+                                    "broken fill ({x0},{y0})-({x1},{y1})-({x2},{y2})"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

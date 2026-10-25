@@ -902,17 +902,17 @@ fn parse_pixels(raw: &str) -> Result<Vec<PixelUpdate>, String> {
         ));
     }
     let mut updates = Vec::with_capacity(tokens.len() / 3);
-    for chunk in tokens.chunks_exact(3) {
-        let x = chunk[0]
+    for &[x_raw, y_raw, color] in tokens.as_chunks::<3>().0 {
+        let x = x_raw
             .parse::<u32>()
-            .map_err(|_| format!("无效的 X 坐标「{}」，必须是非负整数。", chunk[0]))?;
-        let y = chunk[1]
+            .map_err(|_| format!("无效的 X 坐标「{}」，必须是非负整数。", x_raw))?;
+        let y = y_raw
             .parse::<u32>()
-            .map_err(|_| format!("无效的 Y 坐标「{}」，必须是非负整数。", chunk[1]))?;
+            .map_err(|_| format!("无效的 Y 坐标「{}」，必须是非负整数。", y_raw))?;
         updates.push(PixelUpdate {
             x,
             y,
-            color: chunk[2].to_string(),
+            color: color.to_string(),
         });
     }
     Ok(updates)
