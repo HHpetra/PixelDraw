@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.2
 
 - Ellipse and circle fills rasterize along the major axis and are clamped to a staircase that matches its own transpose, so `(rx, ry)` rotated by 90° now paints exactly the transposed cells of `(ry, rx)`. Tall ellipses used to come out as a 3px-wide banana while the same ellipse rotated stayed a thin lens.
 - A circle is now exactly its own transpose at every radius. `r=4` used to paint `4,4,4,3,1` row extents — a notch no rotation could reproduce — and now paints `4,4,3,3,1`.

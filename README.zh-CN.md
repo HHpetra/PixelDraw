@@ -55,8 +55,8 @@ Windows PowerShell 示例（路径按实际解压位置修改）：
 Linux/macOS 解压与检查示例（这里以 Apple Silicon 安装包为例）：
 
 ```sh
-tar -xzf pixeldraw-v0.2.1-aarch64-apple-darwin.tar.gz
-./pixeldraw-v0.2.1-aarch64-apple-darwin/pixeldraw --version
+tar -xzf pixeldraw-v0.2.2-aarch64-apple-darwin.tar.gz
+./pixeldraw-v0.2.2-aarch64-apple-darwin/pixeldraw --version
 ```
 
 然后在 OpenCode 中配置程序的**绝对路径**，不再使用 `cargo run`：
