@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Ellipse and circle fills rasterize along the major axis and are clamped to a staircase that matches its own transpose, so `(rx, ry)` rotated by 90° now paints exactly the transposed cells of `(ry, rx)`. Tall ellipses used to come out as a 3px-wide banana while the same ellipse rotated stayed a thin lens.
+- A circle is now exactly its own transpose at every radius. `r=4` used to paint `4,4,4,3,1` row extents — a notch no rotation could reproduce — and now paints `4,4,3,3,1`.
+- A batch (`draw_batch`) can no longer lose its undo step when the history is full. The pre-batch snapshot is captured before the first op instead of being merged afterwards, which used to evict it as soon as the batch wrote 64 steps.
+- A batch that paints nothing records no undo step, matching single drawing calls.
+
 ## 0.2.1
 
 - Pixel-art circle and ellipse fills use midpoint half-widths so silhouettes stay round at every size: small bead circles keep their classic shape, and large circles / flat ellipses no longer collapse into cones or boxes.

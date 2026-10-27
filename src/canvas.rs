@@ -140,6 +140,11 @@ pub struct Canvas {
     pixels: Vec<[u8; 3]>,
     codes: Vec<Option<&'static str>>,
     undo: Vec<Snapshot>,
+    /// Pre-batch state, held while [`Canvas::begin_batch`] is active so the
+    /// whole batch collapses into one undo step on [`Canvas::end_batch`].
+    pending_batch: Option<Snapshot>,
+    /// Whether any cell was written since the batch started.
+    batch_wrote: bool,
 }
 
 impl Canvas {
@@ -157,6 +162,8 @@ impl Canvas {
             pixels: vec![mode.white_rgb(); len],
             codes: vec![Some("H2"); len],
             undo: Vec::new(),
+            pending_batch: None,
+            batch_wrote: false,
         })
     }
 
@@ -182,14 +189,34 @@ impl Canvas {
         self.mode
     }
 
+    /// Record the pre-write state as one undo step.
+    ///
+    /// Inside a batch, ops defer to the batch snapshot taken by
+    /// [`Canvas::begin_batch`]; the step is pushed once in [`Canvas::end_batch`].
     fn push_undo(&mut self) {
-        self.undo.push(Snapshot {
+        if self.pending_batch.is_some() {
+            return;
+        }
+        self.push_snapshot(Snapshot {
             pixels: self.pixels.clone(),
             codes: self.codes.clone(),
         });
+    }
+
+    fn push_snapshot(&mut self, snapshot: Snapshot) {
+        self.undo.push(snapshot);
         if self.undo.len() > MAX_UNDO {
             self.undo.remove(0);
         }
+    }
+
+    /// Drop the undo step pushed for a write that ended up painting nothing.
+    /// Inside a batch the snapshot is committed only at [`Canvas::end_batch`].
+    fn discard_undo(&mut self) {
+        if self.pending_batch.is_some() {
+            return;
+        }
+        self.undo.pop();
     }
 
     /// Number of undo steps currently available.
@@ -197,19 +224,35 @@ impl Canvas {
         self.undo.len()
     }
 
-    /// Mark the current undo depth so a multi-op tool can collapse into one step.
-    pub fn undo_mark(&self) -> usize {
-        self.undo.len()
+    /// Begin an atomic multi-op drawing step.
+    ///
+    /// Captures the current state once; the writes that follow join it into a
+    /// single undo step when [`Canvas::end_batch`] runs. Taking the snapshot up
+    /// front (instead of merging afterwards) means the pre-batch state cannot be
+    /// evicted by the batch itself when the history is already full.
+    ///
+    /// [`Canvas::end_batch`]: Self::end_batch
+    pub fn begin_batch(&mut self) {
+        debug_assert!(self.pending_batch.is_none(), "nested batches");
+        self.pending_batch = Some(Snapshot {
+            pixels: self.pixels.clone(),
+            codes: self.codes.clone(),
+        });
+        self.batch_wrote = false;
     }
 
-    /// Collapse undo entries added after `mark` into a single step that restores
-    /// the pre-call state. No-op when at most one entry was added.
-    pub fn collapse_undo_to(&mut self, mark: usize) {
-        if self.undo.len() > mark + 1 {
-            let oldest = self.undo[mark].clone();
-            self.undo.truncate(mark);
-            self.undo.push(oldest);
+    /// End an atomic multi-op drawing step started by [`Canvas::begin_batch`].
+    /// Commits one undo step only when the batch actually painted something.
+    ///
+    /// [`Canvas::begin_batch`]: Self::begin_batch
+    pub fn end_batch(&mut self) {
+        let Some(snapshot) = self.pending_batch.take() else {
+            return;
+        };
+        if self.batch_wrote {
+            self.push_snapshot(snapshot);
         }
+        self.batch_wrote = false;
     }
 
     /// Restore the previous canvas state. Returns remaining undo steps.
@@ -292,6 +335,7 @@ impl Canvas {
     fn write_cell(&mut self, index: usize, color: Option<&Color>) {
         self.pixels[index] = color.map_or(self.mode.white_rgb(), |c| c.rgb);
         self.codes[index] = color.map(|c| c.code);
+        self.batch_wrote = true;
     }
 
     /// Stamp a brush-sized square with top-left at `(x, y)`, clipping at the edges.
@@ -349,7 +393,7 @@ impl Canvas {
             written += self.stamp_block(x, y, Some(color), n, &mut touched);
         }
         if written == 0 {
-            self.undo.pop();
+            self.discard_undo();
         }
         Ok(written)
     }
@@ -558,7 +602,7 @@ impl Canvas {
             }
         }
         if written == 0 {
-            self.undo.pop();
+            self.discard_undo();
         }
         Ok(written)
     }
@@ -1009,7 +1053,7 @@ mod tests {
     }
 
     #[test]
-    fn undo_caps_history_and_collapse_merges_batch() {
+    fn undo_caps_history_and_batches_merge_into_one_step() {
         let mut canvas = Canvas::new(16, 16, PaletteMode::Colors221).unwrap();
         for i in 0..(MAX_UNDO + 5) {
             let x = (i % 16) as u32;
@@ -1021,17 +1065,64 @@ mod tests {
         assert_eq!(canvas.undo_len(), MAX_UNDO);
 
         let mut batch = Canvas::new(8, 8, PaletteMode::Colors221).unwrap();
-        let mark = batch.undo_mark();
+        let blank = batch.codes().to_vec();
+        batch.begin_batch();
         batch.paint(&[stamp(0, 0, "正红")], BrushSize::One).unwrap();
         batch.paint(&[stamp(1, 0, "纯黑")], BrushSize::One).unwrap();
         batch.paint(&[stamp(2, 0, "明黄")], BrushSize::One).unwrap();
-        assert_eq!(batch.undo_len(), 3);
-        batch.collapse_undo_to(mark);
+        batch.end_batch();
         assert_eq!(batch.undo_len(), 1);
         batch.undo(1).unwrap();
-        assert_eq!(batch.codes()[0], Some("H2"));
-        assert_eq!(batch.codes()[1], Some("H2"));
-        assert_eq!(batch.codes()[2], Some("H2"));
+        assert_eq!(batch.codes(), &blank[..]);
+    }
+
+    #[test]
+    fn batch_undo_survives_a_full_history() {
+        // The batch snapshot is taken up front, so a batch issued while the
+        // history is full must still revert as a single step. Merging after the
+        // fact used to lose the pre-batch state to eviction.
+        let mut canvas = Canvas::new(8, 8, PaletteMode::Colors221).unwrap();
+        for i in 0..MAX_UNDO {
+            canvas
+                .paint(
+                    &[stamp((i % 8) as u32, (i / 8) as u32, "H7")],
+                    BrushSize::One,
+                )
+                .unwrap();
+        }
+        assert_eq!(canvas.undo_len(), MAX_UNDO);
+        let before = canvas.codes().to_vec();
+
+        canvas.begin_batch();
+        for y in 4..8 {
+            canvas.paint_line(0, y, 7, y, "F5", BrushSize::One).unwrap();
+        }
+        canvas.end_batch();
+        assert_eq!(canvas.undo_len(), MAX_UNDO);
+        assert_eq!(canvas.codes()[4 * 8], Some("F5"));
+
+        canvas.undo(1).unwrap();
+        assert_eq!(
+            canvas.codes(),
+            &before[..],
+            "one undo must revert the batch"
+        );
+    }
+
+    #[test]
+    fn empty_batch_records_no_undo_step() {
+        let mut canvas = Canvas::new(8, 8, PaletteMode::Colors221).unwrap();
+        canvas.begin_batch();
+        // Filling the seed with the color already there writes nothing.
+        canvas.flood_fill(0, 0, "H2").unwrap();
+        canvas.end_batch();
+        assert_eq!(canvas.undo_len(), 0);
+
+        canvas.begin_batch();
+        canvas.paint_line(0, 0, 7, 0, "H7", BrushSize::One).unwrap();
+        canvas.flood_fill(0, 0, "H7").unwrap();
+        canvas.end_batch();
+        assert_eq!(canvas.undo_len(), 1);
     }
 
     #[test]

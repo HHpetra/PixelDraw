@@ -96,23 +96,35 @@ fn outline_cells(fill: &[(i32, i32)]) -> Vec<(i32, i32)> {
         .collect()
 }
 
-/// Fill cells from half-widths `w[dy] = max |dx|` on each row `|dy|`.
-fn fill_from_half_widths(cx: i32, cy: i32, w: &[i32]) -> Vec<(i32, i32)> {
+/// Fill centered spans of half-length `w[offset]`.
+///
+/// With `vertical = true` each span runs along y at `x = cx ± offset`;
+/// otherwise spans run along x at `y = cy ± offset`. Callers always span the
+/// *major* axis so an ellipse and the same ellipse rotated by 90° cover
+/// transposed cells.
+fn fill_from_half_lengths(cx: i32, cy: i32, w: &[i32], vertical: bool) -> Vec<(i32, i32)> {
     let capacity: usize = w
         .iter()
         .enumerate()
-        .map(|(dy, &half)| {
+        .map(|(offset, &half)| {
             let width = (2 * half + 1) as usize;
-            if dy == 0 { width } else { width * 2 }
+            if offset == 0 { width } else { width * 2 }
         })
         .sum();
     let mut points = Vec::with_capacity(capacity);
-    for (dy, &half) in w.iter().enumerate() {
-        let dy = dy as i32;
-        for dx in -half..=half {
-            points.push((cx + dx, cy + dy));
-            if dy > 0 {
-                points.push((cx + dx, cy - dy));
+    for (offset, &half) in w.iter().enumerate() {
+        let offset = offset as i32;
+        for span in -half..=half {
+            if vertical {
+                points.push((cx + offset, cy + span));
+                if offset > 0 {
+                    points.push((cx - offset, cy + span));
+                }
+            } else {
+                points.push((cx + span, cy + offset));
+                if offset > 0 {
+                    points.push((cx + span, cy - offset));
+                }
             }
         }
     }
@@ -125,42 +137,87 @@ fn floor_sqrt_div(n: i64, d: i64) -> i64 {
     (n / d).isqrt()
 }
 
-/// Half-widths `w[0..=ry]` of a filled ellipse with semi-axes `rx`/`ry`.
+/// Half-lengths `w[u]` of a filled ellipse: the extent along the major semi-axis
+/// `b` for every offset `u` along the minor semi-axis `a`.
 ///
-/// Each row is the cover-rule silhouette clamped to at most 1px outside
-/// the mathematical ellipse: small circles keep the classic bead outline
-/// (r=2 → half-widths 2,2,1) and the true equator, while large or flat
-/// shapes stay elliptical instead of collapsing into a cone or a box.
-/// The pole may therefore step by more than 1 on large radii — that is
-/// the circle tapering, not a quantization glitch.
-fn ellipse_half_widths(rx: i32, ry: i32) -> Vec<i32> {
-    let rx = rx.max(0) as i64;
-    let ry = ry.max(0) as i64;
-    if ry == 0 {
-        return vec![rx as i32];
+/// Each extent is the smaller of
+/// - the half-pixel cover test, which keeps small shapes on the classic bead
+///   outline instead of growing spikes, and
+/// - the analytic extent plus one cell, which stops large and flat shapes from
+///   collapsing into a cone or a box.
+///
+/// Spanning the major axis is what makes `(rx, ry)` and `(ry, rx)` cover
+/// transposed cells: both shapes share this `w` and differ only in whether the
+/// spans run along x or y, so the identity holds for any `w`.
+///
+/// A circle additionally has to be its own transpose, and that is a real
+/// constraint on `w`: the two rules round independently per row, so r=4 came out
+/// as `4,4,4,3,1`, where the row at offset 2 reaches 4 but the pole only spans 1
+/// — a notch that no rotation can match. When `a == b` the staircase is
+/// re-clamped to the largest self-conjugate one that fits, `4,4,3,3,1`.
+fn ellipse_half_lengths(a: i32, b: i32) -> Vec<i32> {
+    let a = a.max(0) as i64;
+    let b = b.max(0) as i64;
+    if a == 0 {
+        return vec![b as i32];
     }
-    if rx == 0 {
-        return vec![0; (ry + 1) as usize];
+    let a2 = a * a;
+    let b2 = b * b;
+    // Cover test with half-pixel axes: (u/(a+.5))² + (v/(b+.5))² ≤ 1,
+    // cleared of fractions by multiplying through.
+    let two_a1 = 2 * a + 1;
+    let two_b1 = 2 * b + 1;
+    let cover_limit = two_a1 * two_a1 * two_b1 * two_b1;
+    let cover_step = 4 * two_b1 * two_b1;
+    let cover_den = 4 * two_a1 * two_a1;
+    let mut w: Vec<i64> = (0..=a)
+        .map(|u| {
+            // Extent inside the true ellipse: u²/a² + v²/b² ≤ 1.
+            let analytic = floor_sqrt_div(b2 * (a2 - u * u), a2);
+            let cover = floor_sqrt_div(cover_limit - cover_step * u * u, cover_den);
+            cover.min(analytic + 1)
+        })
+        .collect();
+
+    if a == b {
+        self_conjugate(&mut w);
     }
-    let rx2 = rx * rx;
-    let ry2 = ry * ry;
-    // Cover test with half-pixel axes: (dx/(rx+.5))² + (dy/(ry+.5))² ≤ 1,
-    // cleared of fractions via ×16.
-    let two_rx1 = 2 * rx + 1;
-    let two_ry1 = 2 * ry + 1;
-    let cover_limit = two_rx1 * two_rx1 * two_ry1 * two_ry1;
-    let cover_a = 4 * two_ry1 * two_ry1;
-    let cover_b = 4 * two_rx1 * two_rx1;
-    let mut w = vec![0i32; (ry + 1) as usize];
-    for dy in 0..=ry {
-        let dy2 = dy * dy;
-        // Center inside the true ellipse: dx²·ry² + dy²·rx² ≤ rx²·ry².
-        let analytic_half = floor_sqrt_div(rx2 * (ry2 - dy2), ry2);
-        // Center inside the half-pixel-grown ellipse: cover_a·dx² + cover_b·dy² ≤ cover_limit.
-        let cover_half = floor_sqrt_div(cover_limit - cover_b * dy2, cover_a);
-        w[dy as usize] = cover_half.min(analytic_half + 1) as i32;
+    w.into_iter().map(|v| v as i32).collect()
+}
+
+/// Replace a non-increasing staircase with the largest self-conjugate one that
+/// fits inside it, so the row extents and the column extents agree.
+///
+/// `w` is self-conjugate when `v ≤ w[u] ⟺ u ≤ w[v]`, i.e. when cell `(u, v)` and
+/// its transpose are both inside or both outside. Each round re-clamps every row
+/// to the column extent against the previous round's staircase; the values only
+/// shrink, so this converges to the greatest fixed point.
+fn self_conjugate(w: &mut [i64]) {
+    loop {
+        // `reach[v]` is the last row whose extent still covers column `v`.
+        let mut reach = vec![0i64; w.len()];
+        let mut row = w.len() as i64 - 1;
+        for (v, slot) in reach.iter_mut().enumerate() {
+            while row > 0 && w[row as usize] < v as i64 {
+                row -= 1;
+            }
+            *slot = row;
+        }
+        let mut changed = false;
+        for (u, cell) in w.iter_mut().enumerate() {
+            let clamped = (*cell).min(reach[u]);
+            changed |= clamped != *cell;
+            *cell = clamped;
+        }
+        if !changed {
+            return;
+        }
     }
-    w
+}
+
+/// Minor semi-axis, major semi-axis, and whether spans run along y.
+fn ellipse_shape(rx: i32, ry: i32) -> (i32, i32, bool) {
+    (rx.min(ry), rx.max(ry), ry > rx)
 }
 
 /// Outline of the filled disk: thin ring, no gaps, matches fill radius.
@@ -291,7 +348,8 @@ pub fn ellipse_fill_points(cx: i32, cy: i32, rx: i32, ry: i32) -> Vec<(i32, i32)
     if ry <= 0 {
         return line_points(cx - rx, cy, cx + rx, cy);
     }
-    fill_from_half_widths(cx, cy, &ellipse_half_widths(rx, ry))
+    let (minor, major, vertical) = ellipse_shape(rx, ry);
+    fill_from_half_lengths(cx, cy, &ellipse_half_lengths(minor, major), vertical)
 }
 
 /// Connect sampled curve positions with Bresenham lines so short segments stay gap-free.
@@ -558,6 +616,72 @@ mod tests {
             );
             // Not a box: the top row is much narrower than the equator.
             assert!(top < rx / 2 + 1, "{rx}x{ry} looks rectangular (top={top})");
+        }
+    }
+
+    #[test]
+    fn ellipse_is_its_own_transpose() {
+        // (rx, ry) rotated by 90° must cover exactly the transposed cells of
+        // (ry, rx). The old rasterizer walked rows for both axes, so tall
+        // ellipses turned into a 3px banana while wide ones stayed a lens.
+        for rx in 0..=32 {
+            for ry in 0..=32 {
+                let wide = unique(&ellipse_fill_points(0, 0, rx, ry));
+                let tall = unique(&ellipse_fill_points(0, 0, ry, rx));
+                let transpose: HashSet<(i32, i32)> = tall.iter().map(|&(x, y)| (y, x)).collect();
+                assert_eq!(
+                    wide, transpose,
+                    "{rx}x{ry} is not the transpose of {ry}x{rx}"
+                );
+            }
+        }
+        // Non-square axes share one staircase, so this also holds at the cap.
+        for &(rx, ry) in &[(256, 3), (3, 256), (256, 255), (1, 128), (128, 1)] {
+            let wide = unique(&ellipse_fill_points(0, 0, rx, ry));
+            let tall = unique(&ellipse_fill_points(0, 0, ry, rx));
+            let transpose: HashSet<(i32, i32)> = tall.iter().map(|&(x, y)| (y, x)).collect();
+            assert_eq!(wide, transpose, "{rx}x{ry} transpose mismatch");
+        }
+    }
+
+    #[test]
+    fn circles_are_transpose_symmetric_at_every_size() {
+        // A circle is its own transpose, which is a real constraint on the
+        // staircase: the cover and analytic rules round per row, so r=4 used to
+        // yield 4,4,4,3,1 — a notch no rotation could match.
+        for r in 0..=64 {
+            let fill = unique(&circle_fill_points(0, 0, r));
+            let transpose: HashSet<(i32, i32)> = fill.iter().map(|&(x, y)| (y, x)).collect();
+            assert_eq!(fill, transpose, "r={r} is not its own transpose");
+        }
+    }
+
+    #[test]
+    fn tall_ellipse_keeps_its_width() {
+        // A 3x12 ellipse is a lens on its side: the middle rows must be ~7 wide
+        // and the ends must taper to a single cell, not stay 3 across.
+        let fill = unique(&ellipse_fill_points(0, 0, 3, 12));
+        let row_width = |y: i32| {
+            fill.iter()
+                .filter(|&&(_, cy)| cy == y)
+                .map(|&(x, _)| x)
+                .fold(None::<(i32, i32)>, |acc, x| match acc {
+                    None => Some((x, x)),
+                    Some((lo, hi)) => Some((lo.min(x), hi.max(x))),
+                })
+                .map(|(lo, hi)| hi - lo + 1)
+                .unwrap_or(0)
+        };
+        assert_eq!(row_width(0), 7, "equator width");
+        assert_eq!(row_width(12), 1, "pole must taper to one cell");
+        assert_eq!(row_width(-12), 1, "pole must taper to one cell");
+        for y in 1..12 {
+            assert!(
+                row_width(y) <= row_width(y - 1),
+                "y={y} widens again: {} > {}",
+                row_width(y),
+                row_width(y - 1)
+            );
         }
     }
 

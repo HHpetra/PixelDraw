@@ -623,7 +623,7 @@ impl PixelDraw {
             )]));
         };
         let backup = canvas.clone();
-        let mark = canvas.undo_mark();
+        canvas.begin_batch();
         let mut total = 0usize;
         for (index, op) in ops.iter().enumerate() {
             match apply_draw_op(canvas, op) {
@@ -637,7 +637,7 @@ impl PixelDraw {
                 }
             }
         }
-        canvas.collapse_undo_to(mark);
+        canvas.end_batch();
         let png = encode_or_internal(canvas)?;
         let width = canvas.width();
         let height = canvas.height();
