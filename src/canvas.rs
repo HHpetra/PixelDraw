@@ -123,6 +123,25 @@ impl std::fmt::Display for CanvasError {
 
 impl std::error::Error for CanvasError {}
 
+/// Result of [`Canvas::move_region`] or [`Canvas::copy_region`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegionOutcome {
+    /// False when the transplant would not change any cell.
+    pub changed: bool,
+    /// Cells whose bead code changed. Zero when `changed` is false.
+    pub written: usize,
+    /// Normalized inclusive source bounds.
+    pub x0: u32,
+    pub y0: u32,
+    pub x1: u32,
+    pub y1: u32,
+    /// Inclusive destination bounds.
+    pub nx0: u32,
+    pub ny0: u32,
+    pub nx1: u32,
+    pub ny1: u32,
+}
+
 /// Maximum number of undo snapshots kept per canvas.
 pub const MAX_UNDO: usize = 64;
 
@@ -694,6 +713,177 @@ impl Canvas {
         Ok(changed)
     }
 
+    /// Move the inclusive source rectangle onto a new position.
+    ///
+    /// The block, including empty cells, is read before the source is filled
+    /// with the current background (spaces when none is set) and the block is
+    /// written at the destination, so an overlapping move stays correct. The
+    /// remembered background color is not changed.
+    ///
+    /// Pass exactly one address pair: relative `(dx, dy)`, or absolute
+    /// destination top-left `(tx, ty)`. A source endpoint or a destination
+    /// rectangle outside the canvas is rejected and the canvas is left
+    /// unchanged. When the move would not change any cell — a `(0, 0)` offset,
+    /// an empty block moved onto empty cells, or a background-colored block
+    /// moved onto the same background — nothing is written and no undo step is
+    /// recorded.
+    #[allow(clippy::too_many_arguments)] // Coordinates mirror the drawing tool parameters.
+    pub fn move_region(
+        &mut self,
+        x0: u32,
+        y0: u32,
+        x1: u32,
+        y1: u32,
+        dx: Option<i32>,
+        dy: Option<i32>,
+        tx: Option<i32>,
+        ty: Option<i32>,
+    ) -> Result<RegionOutcome, CanvasError> {
+        self.transplant_region(x0, y0, x1, y1, dx, dy, tx, ty, true)
+    }
+
+    /// Copy the inclusive source rectangle onto a new position.
+    ///
+    /// Addressing, bounds, and the zero-change rule match [`Self::move_region`].
+    /// The source stays; empty cells in the block overwrite the destination.
+    /// The remembered background color is not changed.
+    #[allow(clippy::too_many_arguments)] // Coordinates mirror the drawing tool parameters.
+    pub fn copy_region(
+        &mut self,
+        x0: u32,
+        y0: u32,
+        x1: u32,
+        y1: u32,
+        dx: Option<i32>,
+        dy: Option<i32>,
+        tx: Option<i32>,
+        ty: Option<i32>,
+    ) -> Result<RegionOutcome, CanvasError> {
+        self.transplant_region(x0, y0, x1, y1, dx, dy, tx, ty, false)
+    }
+
+    #[allow(clippy::too_many_arguments)] // Coordinates mirror the drawing tool parameters.
+    fn transplant_region(
+        &mut self,
+        x0: u32,
+        y0: u32,
+        x1: u32,
+        y1: u32,
+        dx: Option<i32>,
+        dy: Option<i32>,
+        tx: Option<i32>,
+        ty: Option<i32>,
+        erase_source: bool,
+    ) -> Result<RegionOutcome, CanvasError> {
+        let address = match (dx, dy, tx, ty) {
+            (Some(dx), Some(dy), None, None) => RegionAddress::Delta(dx, dy),
+            (None, None, Some(tx), Some(ty)) => RegionAddress::Origin(tx, ty),
+            _ => {
+                return Err(CanvasError::InvalidOp {
+                    message: "「dx,dy」与「tx,ty」只能给一组：相对位移填 dx/dy，绝对目标填 tx/ty。"
+                        .into(),
+                });
+            }
+        };
+        self.require_point(x0, y0)?;
+        self.require_point(x1, y1)?;
+        let (left, top, right, bottom) =
+            shapes::rect_bounds(x0 as i32, y0 as i32, x1 as i32, y1 as i32);
+        let sx0 = left as u32;
+        let sy0 = top as u32;
+        let sx1 = right as u32;
+        let sy1 = bottom as u32;
+        let w = sx1 - sx0 + 1;
+        let h = sy1 - sy0 + 1;
+        let (origin_x, origin_y) = match address {
+            RegionAddress::Delta(dx, dy) => (
+                i64::from(left) + i64::from(dx),
+                i64::from(top) + i64::from(dy),
+            ),
+            RegionAddress::Origin(tx, ty) => (i64::from(tx), i64::from(ty)),
+        };
+        let fits = origin_x >= 0
+            && origin_y >= 0
+            && origin_x + i64::from(w) <= i64::from(self.width)
+            && origin_y + i64::from(h) <= i64::from(self.height);
+        if !fits {
+            return Err(CanvasError::InvalidOp {
+                message: format!(
+                    "目标区域越界：起点 ({origin_x}, {origin_y}) 加尺寸 {w}x{h} 超出 0..{} x 0..{}。请调整 dx/dy 或 tx/ty。",
+                    self.width, self.height
+                ),
+            });
+        }
+        let nx0 = u32::try_from(origin_x).expect("destination origin is in range");
+        let ny0 = u32::try_from(origin_y).expect("destination origin is in range");
+        let nx1 = nx0 + w - 1;
+        let ny1 = ny0 + h - 1;
+
+        let mut buffer = Vec::with_capacity((w as usize) * (h as usize));
+        for y in sy0..=sy1 {
+            for x in sx0..=sx1 {
+                buffer.push(self.codes[(y * self.width + x) as usize]);
+            }
+        }
+        let place = PlacedRegion {
+            sx0,
+            sy0,
+            sx1,
+            sy1,
+            tx: nx0,
+            ty: ny0,
+            w,
+            h,
+        };
+        // Read first, then erase, then write, so a one-cell shift does not
+        // sample cells that this same call has already overwritten.
+        let mut next = self.codes.clone();
+        blit_region(
+            &mut next,
+            self.width,
+            &buffer,
+            &place,
+            erase_source,
+            self.background,
+        );
+        let outcome = RegionOutcome {
+            changed: next != self.codes,
+            written: next
+                .iter()
+                .zip(self.codes.iter())
+                .filter(|(after, before)| after != before)
+                .count(),
+            x0: sx0,
+            y0: sy0,
+            x1: sx1,
+            y1: sy1,
+            nx0,
+            ny0,
+            nx1,
+            ny1,
+        };
+        if !outcome.changed {
+            return Ok(outcome);
+        }
+        self.push_undo();
+        for (index, code) in next.into_iter().enumerate() {
+            self.write_code(index, code);
+        }
+        Ok(outcome)
+    }
+
+    /// Write one cell from a stored bead code. Identical codes are left alone
+    /// so a no-op transplant does not mark the open batch as written.
+    fn write_code(&mut self, index: usize, code: Option<&'static str>) {
+        if self.codes[index] == code {
+            return;
+        }
+        let color = code.map(|code| {
+            palette::resolve_color(self.mode, code).expect("canvas stores canonical palette codes")
+        });
+        self.write_cell(index, color);
+    }
+
     fn require_point(&self, x: u32, y: u32) -> Result<(), CanvasError> {
         if x >= self.width || y >= self.height {
             return Err(CanvasError::OutOfBounds {
@@ -721,6 +911,46 @@ impl Canvas {
         let mut buf = Vec::new();
         DynamicImage::ImageRgba8(scaled).write_to(&mut Cursor::new(&mut buf), ImageFormat::Png)?;
         Ok(buf)
+    }
+}
+
+enum RegionAddress {
+    Delta(i32, i32),
+    Origin(i32, i32),
+}
+
+struct PlacedRegion {
+    sx0: u32,
+    sy0: u32,
+    sx1: u32,
+    sy1: u32,
+    tx: u32,
+    ty: u32,
+    w: u32,
+    h: u32,
+}
+
+/// Erase `place`'s source (move only), then stamp the buffer onto the destination.
+fn blit_region(
+    codes: &mut [Option<&'static str>],
+    width: u32,
+    buffer: &[Option<&'static str>],
+    place: &PlacedRegion,
+    erase_source: bool,
+    background: Option<&'static str>,
+) {
+    if erase_source {
+        for y in place.sy0..=place.sy1 {
+            for x in place.sx0..=place.sx1 {
+                codes[(y * width + x) as usize] = background;
+            }
+        }
+    }
+    for row in 0..place.h {
+        for col in 0..place.w {
+            codes[((place.ty + row) * width + (place.tx + col)) as usize] =
+                buffer[(row * place.w + col) as usize];
+        }
     }
 }
 
@@ -1987,5 +2217,300 @@ mod tests {
             );
             assert_eq!(forward.codes(), backward.codes());
         }
+    }
+
+    fn cell(canvas: &Canvas, x: u32, y: u32) -> Option<&'static str> {
+        canvas.codes()[(y * canvas.width() + x) as usize]
+    }
+
+    #[test]
+    fn move_region_writes_source_codes_at_dest_and_background_at_source() {
+        let mut canvas = Canvas::new_with_color(4, 2, PaletteMode::Colors24, "正红").unwrap();
+        assert_eq!(canvas.background_code(), Some("F2"));
+        canvas
+            .paint(&[stamp(0, 0, "纯黑"), stamp(1, 0, "明黄")], BrushSize::One)
+            .unwrap();
+        let undo_before = canvas.undo_len();
+        let outcome = canvas
+            .move_region(0, 0, 1, 0, Some(2), Some(0), None, None)
+            .unwrap();
+        assert!(outcome.changed);
+        assert_eq!(
+            (outcome.x0, outcome.y0, outcome.x1, outcome.y1),
+            (0, 0, 1, 0)
+        );
+        assert_eq!(
+            (outcome.nx0, outcome.ny0, outcome.nx1, outcome.ny1),
+            (2, 0, 3, 0)
+        );
+        // Codes, not RGB: source becomes the remembered background bead.
+        assert_eq!(cell(&canvas, 0, 0), Some("F2"));
+        assert_eq!(cell(&canvas, 1, 0), Some("F2"));
+        assert_eq!(cell(&canvas, 2, 0), Some("H7"));
+        assert_eq!(cell(&canvas, 3, 0), Some("A4"));
+        assert_eq!(cell(&canvas, 0, 1), Some("F2"));
+        assert_eq!(canvas.background_code(), Some("F2"));
+        assert_eq!(canvas.undo_len(), undo_before + 1);
+        canvas.undo(1).unwrap();
+        assert_eq!(cell(&canvas, 0, 0), Some("H7"));
+        assert_eq!(cell(&canvas, 1, 0), Some("A4"));
+        assert_eq!(cell(&canvas, 2, 0), Some("F2"));
+        assert_eq!(canvas.background_code(), Some("F2"));
+    }
+
+    #[test]
+    fn move_region_on_empty_background_leaves_spaces() {
+        let mut canvas = Canvas::new_empty(3, 1, PaletteMode::Colors24).unwrap();
+        assert_eq!(canvas.background_code(), None);
+        canvas
+            .paint(&[stamp(0, 0, "纯黑")], BrushSize::One)
+            .unwrap();
+        canvas
+            .move_region(0, 0, 0, 0, Some(2), Some(0), None, None)
+            .unwrap();
+        assert_eq!(canvas.codes(), &[None, None, Some("H7")]);
+        assert_eq!(canvas.background_code(), None);
+        let png = image::load_from_memory(&canvas.encode_png_8x().unwrap())
+            .unwrap()
+            .to_rgba8();
+        assert_eq!((png.width(), png.height()), (24, 8));
+        assert_eq!(png.get_pixel(0, 0).0[3], 0);
+        assert_eq!(png.get_pixel(16, 0).0, [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn move_region_normalizes_reversed_endpoints() {
+        let mut forward = Canvas::new(4, 3, PaletteMode::Colors221).unwrap();
+        let mut reversed = Canvas::new(4, 3, PaletteMode::Colors221).unwrap();
+        for canvas in [&mut forward, &mut reversed] {
+            canvas
+                .paint(
+                    &[
+                        stamp(0, 0, "正红"),
+                        stamp(1, 0, "纯黑"),
+                        stamp(0, 1, "明黄"),
+                        stamp(1, 1, "-"),
+                    ],
+                    BrushSize::One,
+                )
+                .unwrap();
+        }
+        let by_delta = forward
+            .move_region(0, 0, 1, 1, Some(2), Some(1), None, None)
+            .unwrap();
+        let by_origin = reversed
+            .move_region(1, 1, 0, 0, None, None, Some(2), Some(1))
+            .unwrap();
+        assert_eq!(
+            (by_origin.x0, by_origin.y0, by_origin.x1, by_origin.y1),
+            (0, 0, 1, 1)
+        );
+        assert_eq!(
+            (by_origin.nx0, by_origin.ny0, by_origin.nx1, by_origin.ny1),
+            (by_delta.nx0, by_delta.ny0, by_delta.nx1, by_delta.ny1)
+        );
+        assert_eq!(forward.codes(), reversed.codes());
+        assert_eq!(cell(&forward, 0, 0), Some("H2"));
+        assert_eq!(cell(&forward, 1, 1), Some("H2"));
+        assert_eq!(cell(&forward, 2, 1), Some("F2"));
+        assert_eq!(cell(&forward, 3, 1), Some("H7"));
+        assert_eq!(cell(&forward, 2, 2), Some("A4"));
+        assert_eq!(cell(&forward, 3, 2), None);
+        assert_eq!(forward.background_code(), Some("H2"));
+    }
+
+    #[test]
+    fn move_region_overlap_reads_source_before_erasing() {
+        let mut canvas = Canvas::new(4, 1, PaletteMode::Colors24).unwrap();
+        canvas
+            .paint(
+                &[
+                    stamp(0, 0, "正红"),
+                    stamp(1, 0, "纯黑"),
+                    stamp(2, 0, "明黄"),
+                    stamp(3, 0, "碧绿"),
+                ],
+                BrushSize::One,
+            )
+            .unwrap();
+        canvas
+            .move_region(0, 0, 1, 0, Some(1), Some(0), None, None)
+            .unwrap();
+        // (2,0) is overwritten by the original (1,0), not by the erased cell.
+        // (3,0) sits outside the destination and stays put.
+        assert_eq!(
+            canvas.codes(),
+            &[Some("H2"), Some("F2"), Some("H7"), Some("B5")]
+        );
+
+        // A solid block shifted by one still clears the uncovered source cell.
+        let mut solid = Canvas::new(4, 1, PaletteMode::Colors24).unwrap();
+        solid
+            .paint(
+                &[
+                    stamp(0, 0, "正红"),
+                    stamp(1, 0, "正红"),
+                    stamp(2, 0, "正红"),
+                    stamp(3, 0, "正红"),
+                ],
+                BrushSize::One,
+            )
+            .unwrap();
+        assert_eq!(solid.background_code(), Some("H2"));
+        solid
+            .move_region(0, 0, 2, 0, Some(1), Some(0), None, None)
+            .unwrap();
+        assert_eq!(
+            solid.codes(),
+            &[Some("H2"), Some("F2"), Some("F2"), Some("F2")]
+        );
+    }
+
+    #[test]
+    fn region_transplant_rejects_out_of_bounds_without_undo() {
+        let mut canvas = Canvas::new(4, 3, PaletteMode::Colors144).unwrap();
+        canvas
+            .paint(&[stamp(0, 0, "正红")], BrushSize::One)
+            .unwrap();
+        let codes = canvas.codes().to_vec();
+        let undo = canvas.undo_len();
+        let background = canvas.background_code();
+
+        let err = canvas
+            .move_region(0, 0, 4, 0, Some(0), Some(0), None, None)
+            .unwrap_err();
+        assert_eq!(err.to_string(), "坐标越界：(4, 0) 不在 0..4 x 0..3 范围内");
+
+        let err = canvas
+            .move_region(0, 0, 1, 0, Some(3), Some(0), None, None)
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "目标区域越界：起点 (3, 0) 加尺寸 2x1 超出 0..4 x 0..3。请调整 dx/dy 或 tx/ty。"
+        );
+        let err = canvas
+            .copy_region(0, 0, 0, 0, None, None, Some(-1), Some(0))
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "目标区域越界：起点 (-1, 0) 加尺寸 1x1 超出 0..4 x 0..3。请调整 dx/dy 或 tx/ty。"
+        );
+        assert!(
+            canvas
+                .move_region(0, 0, 0, 0, Some(i32::MIN), Some(i32::MAX), None, None)
+                .is_err()
+        );
+        assert!(
+            canvas
+                .copy_region(0, 0, 0, 0, None, None, Some(i32::MAX), Some(i32::MIN))
+                .is_err()
+        );
+
+        canvas.begin_batch();
+        assert!(
+            canvas
+                .move_region(0, 0, 9, 0, Some(1), Some(0), None, None)
+                .is_err()
+        );
+        canvas.end_batch();
+
+        assert_eq!(canvas.codes(), &codes[..]);
+        assert_eq!(canvas.undo_len(), undo);
+        assert_eq!(canvas.background_code(), background);
+    }
+
+    #[test]
+    fn region_transplant_skips_undo_when_nothing_changes() {
+        let mut canvas = Canvas::new(4, 2, PaletteMode::Colors24).unwrap();
+        let codes = canvas.codes().to_vec();
+        let same_place = canvas
+            .move_region(0, 0, 1, 1, Some(0), Some(0), None, None)
+            .unwrap();
+        assert!(!same_place.changed);
+        assert_eq!(same_place.written, 0);
+        assert_eq!(canvas.undo_len(), 0);
+        let onto_background = canvas
+            .copy_region(0, 0, 1, 0, Some(2), Some(0), None, None)
+            .unwrap();
+        assert!(!onto_background.changed);
+        assert_eq!(canvas.codes(), &codes[..]);
+        assert_eq!(canvas.undo_len(), 0);
+
+        let mut empty = Canvas::new_empty(4, 2, PaletteMode::Colors221).unwrap();
+        assert!(
+            !empty
+                .move_region(0, 0, 1, 0, Some(2), Some(1), None, None)
+                .unwrap()
+                .changed
+        );
+        assert_eq!(empty.undo_len(), 0);
+        assert!(empty.codes().iter().all(Option::is_none));
+
+        let mut red = Canvas::new_with_color(4, 2, PaletteMode::Colors24, "正红").unwrap();
+        assert!(
+            !red.move_region(0, 0, 1, 0, None, None, Some(2), Some(0))
+                .unwrap()
+                .changed
+        );
+        assert_eq!(red.undo_len(), 0);
+        assert_eq!(red.background_code(), Some("F2"));
+        assert!(red.codes().iter().all(|code| *code == Some("F2")));
+
+        canvas
+            .paint(&[stamp(0, 0, "纯黑")], BrushSize::One)
+            .unwrap();
+        let undo = canvas.undo_len();
+        assert!(
+            !canvas
+                .move_region(0, 0, 0, 0, Some(0), Some(0), None, None)
+                .unwrap()
+                .changed
+        );
+        assert_eq!(canvas.undo_len(), undo);
+        assert_eq!(cell(&canvas, 0, 0), Some("H7"));
+
+        canvas.begin_batch();
+        assert!(
+            !canvas
+                .move_region(1, 0, 1, 0, Some(0), Some(0), None, None)
+                .unwrap()
+                .changed
+        );
+        canvas.end_batch();
+        assert_eq!(canvas.undo_len(), undo);
+    }
+
+    #[test]
+    fn copy_region_keeps_source_and_empty_block_erases_destination() {
+        let mut canvas = Canvas::new(4, 1, PaletteMode::Colors24).unwrap();
+        canvas
+            .paint(&[stamp(0, 0, "正红"), stamp(1, 0, "纯黑")], BrushSize::One)
+            .unwrap();
+        let outcome = canvas
+            .copy_region(0, 0, 1, 0, Some(2), Some(0), None, None)
+            .unwrap();
+        assert!(outcome.changed);
+        assert_eq!(
+            canvas.codes(),
+            &[Some("F2"), Some("H7"), Some("F2"), Some("H7")]
+        );
+        assert_eq!(canvas.background_code(), Some("H2"));
+        assert_eq!(canvas.undo_len(), 2);
+        canvas.undo(1).unwrap();
+        assert_eq!(
+            canvas.codes(),
+            &[Some("F2"), Some("H7"), Some("H2"), Some("H2")]
+        );
+
+        let mut empty_source = Canvas::new_empty(4, 1, PaletteMode::Colors144).unwrap();
+        empty_source
+            .paint(&[stamp(2, 0, "正红"), stamp(3, 0, "纯黑")], BrushSize::One)
+            .unwrap();
+        empty_source
+            .copy_region(0, 0, 1, 0, None, None, Some(2), Some(0))
+            .unwrap();
+        assert_eq!(empty_source.codes(), &[None, None, None, None]);
+        assert_eq!(empty_source.background_code(), None);
+        assert_eq!(empty_source.undo_len(), 2);
     }
 }
