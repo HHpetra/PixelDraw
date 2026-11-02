@@ -607,6 +607,30 @@ impl Canvas {
         Ok(written)
     }
 
+    /// Replace every cell with `color`, overwriting beads and empty cells alike.
+    ///
+    /// The color is resolved before any cell is written. Unlike [`Self::flood_fill`],
+    /// this does not stop at a region of the same bead code. Records one undo step
+    /// only when at least one cell's code changes, and returns that count. A canvas
+    /// that is already entirely `color` is left unchanged.
+    pub fn fill_background(&mut self, color: &str) -> Result<usize, CanvasError> {
+        let fill =
+            palette::resolve_color(self.mode, color).ok_or_else(|| CanvasError::UnknownColor {
+                color: color.to_string(),
+                mode: self.mode,
+            })?;
+        let new_code = Some(fill.code);
+        let changed = self.codes.iter().filter(|code| **code != new_code).count();
+        if changed == 0 {
+            return Ok(0);
+        }
+        self.push_undo();
+        for index in 0..self.pixels.len() {
+            self.write_cell(index, Some(fill));
+        }
+        Ok(changed)
+    }
+
     fn require_point(&self, x: u32, y: u32) -> Result<(), CanvasError> {
         if x >= self.width || y >= self.height {
             return Err(CanvasError::OutOfBounds {
@@ -1295,6 +1319,115 @@ mod tests {
         let undo_before = canvas.undo_len();
         assert_eq!(canvas.flood_fill(0, 0, "-").unwrap(), 0);
         assert_eq!(canvas.undo_len(), undo_before);
+    }
+
+    #[test]
+    fn fill_background_overwrites_every_cell_and_undoes_once() {
+        for mode in [
+            PaletteMode::Colors24,
+            PaletteMode::Colors144,
+            PaletteMode::Colors221,
+        ] {
+            let mut canvas = Canvas::new(4, 3, mode).unwrap();
+            canvas
+                .paint(
+                    &[stamp(0, 0, "纯黑"), stamp(1, 0, "正红"), stamp(2, 1, "H2")],
+                    BrushSize::One,
+                )
+                .unwrap();
+            let before_codes = canvas.codes().to_vec();
+            let before_pixels = canvas.pixels.clone();
+            let undo_before = canvas.undo_len();
+
+            let err = canvas.fill_background("彩虹").unwrap_err();
+            assert!(matches!(err, CanvasError::UnknownColor { .. }));
+            // `-` clears a region in flood_fill; it is not a background color.
+            assert!(canvas.fill_background("-").is_err());
+            assert!(canvas.fill_background("  ").is_err());
+            if mode == PaletteMode::Colors24 {
+                assert!(canvas.fill_background("淡鹅黄").is_err());
+                assert!(canvas.fill_background("A1").is_err());
+            }
+            assert_eq!(canvas.codes(), &before_codes[..]);
+            assert_eq!(canvas.pixels, before_pixels);
+            assert_eq!(canvas.undo_len(), undo_before);
+
+            let red = palette::resolve_color(mode, "正红").unwrap();
+            let area = (canvas.width() * canvas.height()) as usize;
+            // One cell is already 正红; the rest, including white beads, change.
+            assert_eq!(canvas.fill_background("  f2 ").unwrap(), area - 1);
+            assert!(canvas.codes().iter().all(|code| *code == Some(red.code)));
+            assert!(canvas.pixels.iter().all(|rgb| *rgb == red.rgb));
+            assert_eq!(canvas.undo_len(), undo_before + 1);
+            assert_eq!(crate::pattern::counts(&canvas).get("F2"), Some(&area));
+
+            assert_eq!(canvas.fill_background("正红").unwrap(), 0);
+            assert_eq!(canvas.fill_background("F2").unwrap(), 0);
+            assert_eq!(canvas.undo_len(), undo_before + 1);
+
+            canvas.undo(1).unwrap();
+            assert_eq!(canvas.codes(), &before_codes[..]);
+            assert_eq!(canvas.pixels, before_pixels);
+            assert_eq!(canvas.undo_len(), undo_before);
+
+            let mut empty = Canvas::new_empty(3, 2, mode).unwrap();
+            assert!(empty.codes().iter().all(Option::is_none));
+            let white = palette::resolve_color(mode, "H2").unwrap();
+            assert_eq!(empty.fill_background("雪白").unwrap(), 6);
+            assert!(empty.codes().iter().all(|code| *code == Some("H2")));
+            assert!(empty.pixels.iter().all(|rgb| *rgb == white.rgb));
+            let png = image::load_from_memory(&empty.encode_png_8x().unwrap())
+                .unwrap()
+                .to_rgba8();
+            assert_eq!((png.width(), png.height()), (24, 16));
+            assert!(
+                png.pixels()
+                    .all(|pixel| pixel.0[3] == 255 && white.rgb == pixel.0[..3])
+            );
+            assert_eq!(empty.undo_len(), 1);
+            empty.undo(1).unwrap();
+            assert!(empty.codes().iter().all(Option::is_none));
+            let cleared = image::load_from_memory(&empty.encode_png_8x().unwrap())
+                .unwrap()
+                .to_rgba8();
+            assert!(cleared.pixels().all(|pixel| pixel.0[3] == 0));
+
+            let mut white_canvas = Canvas::new(2, 2, mode).unwrap();
+            assert_eq!(white_canvas.fill_background("h2").unwrap(), 0);
+            assert_eq!(white_canvas.undo_len(), 0);
+            assert_eq!(white_canvas.fill_background("中国红").unwrap(), 4);
+            assert!(white_canvas.codes().iter().all(|code| *code == Some("F5")));
+
+            let mut batched = Canvas::new(2, 2, mode).unwrap();
+            batched
+                .paint(&[stamp(0, 0, "纯黑")], BrushSize::One)
+                .unwrap();
+            let prior = batched.codes().to_vec();
+            batched.begin_batch();
+            assert!(batched.fill_background("nope").is_err());
+            batched.end_batch();
+            assert_eq!(batched.codes(), &prior[..]);
+            assert_eq!(batched.undo_len(), 1);
+
+            batched.begin_batch();
+            assert_eq!(batched.fill_background("明黄").unwrap(), 4);
+            batched
+                .paint(&[stamp(1, 1, "纯黑")], BrushSize::One)
+                .unwrap();
+            batched.end_batch();
+            assert_eq!(batched.undo_len(), 2);
+            assert_eq!(
+                batched
+                    .codes()
+                    .iter()
+                    .filter(|code| **code == Some("A4"))
+                    .count(),
+                3
+            );
+            assert_eq!(batched.codes()[3], Some("H7"));
+            batched.undo(1).unwrap();
+            assert_eq!(batched.codes(), &prior[..]);
+        }
     }
 
     #[test]

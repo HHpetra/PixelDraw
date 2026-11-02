@@ -152,6 +152,7 @@ fn stdio_draws_and_saves_outside_the_working_directory() {
             "draw_pixels",
             "draw_rect",
             "draw_triangle",
+            "fill_background",
             "flood_fill",
             "list_colors",
             "save_image",
@@ -383,4 +384,114 @@ fn stdio_shapes_and_fill_export_the_same_state_as_pixels() {
             }
         }
     }
+}
+
+#[test]
+fn stdio_fill_background_overwrites_existing_pixels() {
+    let output = tempfile::tempdir().unwrap();
+    let mut process = Process::spawn(
+        output.path(),
+        &[
+            std::ffi::OsStr::new("--output-dir"),
+            output.path().as_os_str(),
+        ],
+    );
+    process.request(
+        1,
+        "initialize",
+        json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "fill-background-test", "version": "1"}
+        }),
+    );
+    process.send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+
+    let schema = process.request(2, "tools/list", json!({}));
+    let tool = schema["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "fill_background")
+        .expect("fill_background tool");
+    assert!(tool["description"].as_str().unwrap().contains("每一个格子"));
+    let required = tool["inputSchema"]["required"]
+        .as_array()
+        .expect("fill_background parameters");
+    assert!(required.iter().any(|name| name == "color"));
+
+    process.request(
+        3,
+        "tools/call",
+        json!({"name":"create_canvas","arguments":{"width":8,"height":8,"palette":"24"}}),
+    );
+    let same = process.request(
+        4,
+        "tools/call",
+        json!({"name":"fill_background","arguments":{"color":"H2"}}),
+    );
+    assert_ne!(same["isError"], true, "{same}");
+    assert!(
+        same["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("改写 0 个")
+    );
+    let no_undo = process.request(5, "tools/call", json!({"name":"undo","arguments":{}}));
+    assert_eq!(no_undo["isError"], true, "{no_undo}");
+
+    process.request(
+        6,
+        "tools/call",
+        json!({"name":"draw_pixels","arguments":{"pixels":"0 0 H7 7 7 A4 3 3 F2"}}),
+    );
+    let rejected = process.request(
+        7,
+        "tools/call",
+        json!({"name":"fill_background","arguments":{"color":"彩虹"}}),
+    );
+    assert_eq!(rejected["isError"], true, "{rejected}");
+
+    let filled = process.request(
+        8,
+        "tools/call",
+        json!({"name":"fill_background","arguments":{"color":"中国红"}}),
+    );
+    let image = image::load_from_memory(&response_png(&filled))
+        .unwrap()
+        .to_rgb8();
+    assert!(image.pixels().all(|pixel| pixel.0 == [0xE7, 0x00, 0x2F]));
+
+    let undone = process.request(
+        9,
+        "tools/call",
+        json!({"name":"undo","arguments":{"steps":1}}),
+    );
+    let restored = image::load_from_memory(&response_png(&undone))
+        .unwrap()
+        .to_rgb8();
+    assert_eq!(restored.get_pixel(0, 0).0, [0, 0, 0]);
+    assert_eq!(restored.get_pixel(56, 56).0, [0xFB, 0xED, 0x56]);
+    assert_eq!(restored.get_pixel(24, 24).0, [0xFC, 0x3D, 0x46]);
+    assert_eq!(restored.get_pixel(8, 0).0, [254, 255, 255]);
+
+    process.request(
+        10,
+        "tools/call",
+        json!({"name":"create_canvas","arguments":{"width":8,"height":8,"background":"empty","palette":"24"}}),
+    );
+    let black = process.request(
+        11,
+        "tools/call",
+        json!({"name":"fill_background","arguments":{"color":"纯黑"}}),
+    );
+    let black_img = image::load_from_memory(&response_png(&black))
+        .unwrap()
+        .to_rgba8();
+    assert!(black_img.pixels().all(|pixel| pixel.0 == [0, 0, 0, 255]));
+    let cleared = process.request(12, "tools/call", json!({"name":"undo","arguments":{}}));
+    let cleared_img = image::load_from_memory(&response_png(&cleared))
+        .unwrap()
+        .to_rgba8();
+    assert!(cleared_img.pixels().all(|pixel| pixel.0[3] == 0));
 }
