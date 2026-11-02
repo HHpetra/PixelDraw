@@ -495,3 +495,161 @@ fn stdio_fill_background_overwrites_existing_pixels() {
         .to_rgba8();
     assert!(cleared_img.pixels().all(|pixel| pixel.0[3] == 0));
 }
+
+#[test]
+fn stdio_create_canvas_background_color_updates_when_refilled() {
+    let output = tempfile::tempdir().unwrap();
+    let mut process = Process::spawn(
+        output.path(),
+        &[
+            std::ffi::OsStr::new("--output-dir"),
+            output.path().as_os_str(),
+        ],
+    );
+    process.request(
+        1,
+        "initialize",
+        json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "background-color-test", "version": "1"}
+        }),
+    );
+    process.send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+
+    let schema = process.request(2, "tools/list", json!({}));
+    let tool = schema["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "create_canvas")
+        .expect("create_canvas tool");
+    let description = tool["description"].as_str().unwrap();
+    assert!(description.contains("background_color"));
+    assert!(description.contains("fill_background"));
+    let properties = &tool["inputSchema"]["properties"];
+    assert!(properties["background_color"].is_object(), "{properties}");
+    let required = tool["inputSchema"]["required"].as_array();
+    assert!(
+        required.is_none_or(|names| !names.iter().any(|name| name == "background_color")),
+        "background_color must stay optional: {required:?}"
+    );
+
+    let created = process.request(
+        3,
+        "tools/call",
+        json!({
+            "name": "create_canvas",
+            "arguments": {"width": 8, "height": 8, "palette": "24", "background_color": "正红"}
+        }),
+    );
+    assert_ne!(created["isError"], true, "{created}");
+    assert!(
+        created["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("背景为 正红（F2）")
+    );
+    let red = image::load_from_memory(&response_png(&created))
+        .unwrap()
+        .to_rgb8();
+    assert!(red.pixels().all(|pixel| pixel.0 == [0xFC, 0x3D, 0x46]));
+
+    let omitted = process.request(
+        4,
+        "tools/call",
+        json!({"name":"create_canvas","arguments":{"width":8,"height":8,"palette":"24"}}),
+    );
+    assert!(
+        omitted["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("背景为 雪白（H2）")
+    );
+    let white = image::load_from_memory(&response_png(&omitted))
+        .unwrap()
+        .to_rgb8();
+    assert!(white.pixels().all(|pixel| pixel.0 == [254, 255, 255]));
+
+    let rejected = process.request(
+        5,
+        "tools/call",
+        json!({
+            "name": "create_canvas",
+            "arguments": {
+                "width": 8,
+                "height": 8,
+                "palette": "24",
+                "background": "empty",
+                "background_color": "纯黑"
+            }
+        }),
+    );
+    assert_eq!(rejected["isError"], true, "{rejected}");
+    let still_white = process.request(
+        6,
+        "tools/call",
+        json!({"name":"fill_background","arguments":{"color":"H2"}}),
+    );
+    assert!(
+        still_white["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("改写 0 个")
+    );
+    assert!(
+        still_white["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("当前背景色为 雪白（H2）")
+    );
+    let no_undo = process.request(7, "tools/call", json!({"name":"undo","arguments":{}}));
+    assert_eq!(no_undo["isError"], true, "{no_undo}");
+
+    process.request(
+        8,
+        "tools/call",
+        json!({
+            "name": "create_canvas",
+            "arguments": {"width": 8, "height": 8, "palette": "24", "background_color": "F2"}
+        }),
+    );
+    process.request(
+        9,
+        "tools/call",
+        json!({"name":"draw_pixels","arguments":{"pixels":"0 0 H7"}}),
+    );
+    let filled = process.request(
+        10,
+        "tools/call",
+        json!({"name":"fill_background","arguments":{"color":"中国红"}}),
+    );
+    assert!(
+        filled["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("当前背景色为 中国红（F5）")
+    );
+    let china = image::load_from_memory(&response_png(&filled))
+        .unwrap()
+        .to_rgb8();
+    assert!(china.pixels().all(|pixel| pixel.0 == [0xE7, 0x00, 0x2F]));
+
+    let undone = process.request(11, "tools/call", json!({"name":"undo","arguments":{}}));
+    let restored = image::load_from_memory(&response_png(&undone))
+        .unwrap()
+        .to_rgb8();
+    assert_eq!(restored.get_pixel(0, 0).0, [0, 0, 0]);
+    assert_eq!(restored.get_pixel(8, 0).0, [0xFC, 0x3D, 0x46]);
+    let remembered = process.request(
+        12,
+        "tools/call",
+        json!({"name":"fill_background","arguments":{"color":"正红"}}),
+    );
+    let remembered_text = remembered["content"][0]["text"].as_str().unwrap();
+    assert!(remembered_text.contains("改写 1 个"), "{remembered_text}");
+    assert!(
+        remembered_text.contains("当前背景色为 正红（F2）"),
+        "{remembered_text}"
+    );
+}

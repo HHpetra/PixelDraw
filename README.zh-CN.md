@@ -153,7 +153,7 @@ draw_pixels   {"pixels":"2 0 -"}
 save_image    {"filename":"cat.png","output":"both"}
 ```
 
-`background` 默认为 `white`（整张铺 H2 白豆）；设成 `empty` 时不放豆。`draw_pixels` 的 `-` 表示清除，支持相同的笔刷与整批校验。H2 始终是需要放的白色豆，空格不标号、不计数；上例只需 2 颗豆。白色区域不会自动当作背景删除。
+`background` 默认为 `white`（整张铺 H2 白豆）；设成 `empty` 时不放豆。可选 `background_color`（中文名或 MARD 色号）会整张铺该色豆，并记为当前背景色；省略时仍按 `white` / `empty`。`background` 为 `empty` 时不能同时传 `background_color`。`draw_pixels` 的 `-` 表示清除，支持相同的笔刷与整批校验。H2 始终是需要放的白色豆，空格不标号、不计数；上例只需 2 颗豆。白色区域不会自动当作背景删除。
 
 两种导出共用规范化色号和占用信息，不从 RGB 反查色号。重叠绘制只统计最后留下的豆子。
 
@@ -163,7 +163,7 @@ save_image    {"filename":"cat.png","output":"both"}
 
 | 工具 | 功能 |
 | --- | --- |
-| `create_canvas` | 创建画布（`background`: white 默认白豆 / empty 空格），宽高 1 至 128；锁定 24、144 或默认的 221 色表。成功重建会替换旧画布。 |
+| `create_canvas` | 创建画布（`background`: white 默认白豆 / empty 空格）。可选 `background_color` 用色表颜色铺满并记为当前背景色；省略时保持原来的 white / empty。`empty` 不能与 `background_color` 同时使用。宽高 1 至 128；锁定 24、144 或默认的 221 色表。成功创建会替换当前画布；颜色非法时不覆盖。 |
 | `list_colors` | 查询当前锁定的色表；尚未创建画布时可以指定要查询的色表。仅在需要查色时调用。 |
 | `draw_line` | 画直线；`brush` 为线宽 1/2/4/8，坐标不必对齐网格。 |
 | `draw_rect` | 矩形；`fill` 区分填充/描边，描边可用 `brush` 加粗。 |
@@ -172,7 +172,7 @@ save_image    {"filename":"cat.png","output":"both"}
 | `draw_ellipse` | 椭圆；`fill` 区分填充/描边，描边可用 `brush` 加粗。 |
 | `draw_curve` | 曲线：`points` 为 `[x,y]` 列表；2 点直线、3 点二次贝塞尔、4 点三次贝塞尔、≥5 点过点平滑样条。 |
 | `flood_fill` | 油漆桶，四连通替换种子点同色号区域；空格与 H2 白豆分开处理；`color` 可用 `-` 清为空格。 |
-| `fill_background` | 用一种颜色（中文名或 MARD 色号）强行覆盖每一个格子，包括空格和已有画面。颜色非法时画布不变。有格子变化时记一次 undo；整张已是该颜色时不改动、不记步。也可作为 `draw_batch` 的一步。 |
+| `fill_background` | 用一种颜色（中文名或 MARD 色号）强行覆盖每一个格子，包括空格和已有画面，并把已记录的背景色改为该颜色。颜色非法时画布和背景色都不变。有格子变化，或背景色不同时，记一次 undo；格子和背景色都已是该颜色时不改动、不记步。undo 会恢复之前的背景色。也可作为 `draw_batch` 的一步。 |
 | `draw_batch` | 多笔有序批量，原子执行；任一步失败整批拒绝，只回最终预览；成功整批只记一次 undo。操作类型包含 `fill_background`。 |
 | `draw_pixels` | 散点/方块笔刷落点：`x y 颜色` 三元组；`-` 清除为空格。 |
 | `undo` | 撤回绘制步骤（`steps` 可选，默认 1）。每次成功绘制记一步，`draw_batch` 整批记一步；`create_canvas` 清空历史。 |
@@ -183,7 +183,7 @@ save_image    {"filename":"cat.png","output":"both"}
 - 线宽/描边笔刷为 1、2、4 或 8，从落点向右下扩展 `N×N`（与 `draw_pixels` 足迹一致）；填充与油漆桶忽略笔刷。
 - `draw_pixels` 的笔刷坐标必须是笔刷尺寸的倍数，整个方块都必须在画布内。
 - 重复落点按输入顺序覆盖；非法批次不会修改画布。
-- `fill_background` 覆盖每一个格子，不会像 `flood_fill` 那样停在同色区域边界，也不接受 `-` 清为空格。
+- `fill_background` 覆盖每一个格子，并把当前背景色改为新颜色；不会像 `flood_fill` 那样停在同色区域边界，也不接受 `-` 清为空格。`undo` 会一并恢复之前的背景色。
 - 圆/椭圆半径可超出画布，超出部分自动裁剪（半径/轴长超过 256 时按 256 计算）；端点、曲线路径点、圆心、种子点必须在画布内。
 - 每个服务实例只有一张内存画布；重启会丢失未保存内容。撤销历史仅存内存（最多 64 步），`create_canvas` 会清空。暂不支持导入、会话持久化或原始尺寸导出。
 - 像素画预览通过最近邻采样放大 8 倍；拼豆图纸使用独立的网格布局。24、144、221 三套色表中，同一个 MARD 色号使用相同的中文名和 RGB。

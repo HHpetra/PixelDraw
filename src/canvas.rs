@@ -130,6 +130,8 @@ pub const MAX_UNDO: usize = 64;
 struct Snapshot {
     pixels: Vec<[u8; 3]>,
     codes: Vec<Option<&'static str>>,
+    /// Remembered background bead code. `None` is an empty canvas (no beads).
+    background: Option<&'static str>,
 }
 
 #[derive(Debug, Clone)]
@@ -139,11 +141,16 @@ pub struct Canvas {
     mode: PaletteMode,
     pixels: Vec<[u8; 3]>,
     codes: Vec<Option<&'static str>>,
+    /// Bead code last chosen as the canvas background.
+    ///
+    /// `Some("H2")` for the default white canvas. `None` for `background: empty`
+    /// until [`Canvas::fill_background`] sets a color. Drawing tools do not change it.
+    background: Option<&'static str>,
     undo: Vec<Snapshot>,
     /// Pre-batch state, held while [`Canvas::begin_batch`] is active so the
     /// whole batch collapses into one undo step on [`Canvas::end_batch`].
     pending_batch: Option<Snapshot>,
-    /// Whether any cell was written since the batch started.
+    /// Whether this batch changed any cell or the remembered background color.
     batch_wrote: bool,
 }
 
@@ -161,6 +168,7 @@ impl Canvas {
             mode,
             pixels: vec![mode.white_rgb(); len],
             codes: vec![Some("H2"); len],
+            background: Some("H2"),
             undo: Vec::new(),
             pending_batch: None,
             batch_wrote: false,
@@ -170,6 +178,29 @@ impl Canvas {
     pub fn new_empty(width: u32, height: u32, mode: PaletteMode) -> Result<Self, CanvasError> {
         let mut canvas = Self::new(width, height, mode)?;
         canvas.codes.fill(None);
+        canvas.background = None;
+        Ok(canvas)
+    }
+
+    /// Fill a new canvas with one palette color and remember it as the background.
+    ///
+    /// Size is checked before the color, matching [`Canvas::new`]. An unknown color
+    /// does not produce a canvas. The result has an empty undo history.
+    pub fn new_with_color(
+        width: u32,
+        height: u32,
+        mode: PaletteMode,
+        color: &str,
+    ) -> Result<Self, CanvasError> {
+        let mut canvas = Self::new(width, height, mode)?;
+        let fill =
+            palette::resolve_color(mode, color).ok_or_else(|| CanvasError::UnknownColor {
+                color: color.to_string(),
+                mode,
+            })?;
+        canvas.pixels.fill(fill.rgb);
+        canvas.codes.fill(Some(fill.code));
+        canvas.background = Some(fill.code);
         Ok(canvas)
     }
 
@@ -189,6 +220,30 @@ impl Canvas {
         self.mode
     }
 
+    /// Remembered background bead code, or `None` when the canvas is empty.
+    pub fn background_code(&self) -> Option<&'static str> {
+        self.background
+    }
+
+    /// `雪白（H2）` for a bead background, or `空格` when none is set.
+    pub fn background_label(&self) -> String {
+        match self.background_code() {
+            None => "空格".to_string(),
+            Some(code) => match palette::resolve_color(self.mode, code) {
+                Some(color) => format!("{}（{}）", color.name, color.code),
+                None => code.to_string(),
+            },
+        }
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            pixels: self.pixels.clone(),
+            codes: self.codes.clone(),
+            background: self.background,
+        }
+    }
+
     /// Record the pre-write state as one undo step.
     ///
     /// Inside a batch, ops defer to the batch snapshot taken by
@@ -197,10 +252,7 @@ impl Canvas {
         if self.pending_batch.is_some() {
             return;
         }
-        self.push_snapshot(Snapshot {
-            pixels: self.pixels.clone(),
-            codes: self.codes.clone(),
-        });
+        self.push_snapshot(self.snapshot());
     }
 
     fn push_snapshot(&mut self, snapshot: Snapshot) {
@@ -234,15 +286,13 @@ impl Canvas {
     /// [`Canvas::end_batch`]: Self::end_batch
     pub fn begin_batch(&mut self) {
         debug_assert!(self.pending_batch.is_none(), "nested batches");
-        self.pending_batch = Some(Snapshot {
-            pixels: self.pixels.clone(),
-            codes: self.codes.clone(),
-        });
+        self.pending_batch = Some(self.snapshot());
         self.batch_wrote = false;
     }
 
     /// End an atomic multi-op drawing step started by [`Canvas::begin_batch`].
-    /// Commits one undo step only when the batch actually painted something.
+    /// Commits one undo step only when the batch changed cells or the remembered
+    /// background color.
     ///
     /// [`Canvas::begin_batch`]: Self::begin_batch
     pub fn end_batch(&mut self) {
@@ -267,6 +317,7 @@ impl Canvas {
             };
             self.pixels = snap.pixels;
             self.codes = snap.codes;
+            self.background = snap.background;
         }
         Ok(self.undo.len())
     }
@@ -610,9 +661,12 @@ impl Canvas {
     /// Replace every cell with `color`, overwriting beads and empty cells alike.
     ///
     /// The color is resolved before any cell is written. Unlike [`Self::flood_fill`],
-    /// this does not stop at a region of the same bead code. Records one undo step
-    /// only when at least one cell's code changes, and returns that count. A canvas
-    /// that is already entirely `color` is left unchanged.
+    /// this does not stop at a region of the same bead code. The remembered
+    /// background color becomes `color` whenever this fill is applied, including
+    /// when every cell was already that color but the remembered color differed.
+    /// Records one undo step when any cell changes or the remembered color changes.
+    /// Returns how many cells changed. A canvas that is already entirely `color`
+    /// and already remembers that color is left unchanged.
     pub fn fill_background(&mut self, color: &str) -> Result<usize, CanvasError> {
         let fill =
             palette::resolve_color(self.mode, color).ok_or_else(|| CanvasError::UnknownColor {
@@ -621,12 +675,21 @@ impl Canvas {
             })?;
         let new_code = Some(fill.code);
         let changed = self.codes.iter().filter(|code| **code != new_code).count();
-        if changed == 0 {
+        let background_changed = self.background != new_code;
+        if changed == 0 && !background_changed {
             return Ok(0);
         }
         self.push_undo();
-        for index in 0..self.pixels.len() {
-            self.write_cell(index, Some(fill));
+        if changed > 0 {
+            for index in 0..self.pixels.len() {
+                self.write_cell(index, Some(fill));
+            }
+        }
+        self.background = new_code;
+        // A metadata-only update never calls `write_cell`, but the batch still
+        // has to keep the pre-change snapshot so undo can restore the old color.
+        if background_changed {
+            self.batch_wrote = true;
         }
         Ok(changed)
     }
@@ -1329,12 +1392,15 @@ mod tests {
             PaletteMode::Colors221,
         ] {
             let mut canvas = Canvas::new(4, 3, mode).unwrap();
+            assert_eq!(canvas.background_code(), Some("H2"));
+            assert_eq!(canvas.background_label(), "雪白（H2）");
             canvas
                 .paint(
                     &[stamp(0, 0, "纯黑"), stamp(1, 0, "正红"), stamp(2, 1, "H2")],
                     BrushSize::One,
                 )
                 .unwrap();
+            assert_eq!(canvas.background_code(), Some("H2"));
             let before_codes = canvas.codes().to_vec();
             let before_pixels = canvas.pixels.clone();
             let undo_before = canvas.undo_len();
@@ -1351,6 +1417,7 @@ mod tests {
             assert_eq!(canvas.codes(), &before_codes[..]);
             assert_eq!(canvas.pixels, before_pixels);
             assert_eq!(canvas.undo_len(), undo_before);
+            assert_eq!(canvas.background_code(), Some("H2"));
 
             let red = palette::resolve_color(mode, "正红").unwrap();
             let area = (canvas.width() * canvas.height()) as usize;
@@ -1358,23 +1425,30 @@ mod tests {
             assert_eq!(canvas.fill_background("  f2 ").unwrap(), area - 1);
             assert!(canvas.codes().iter().all(|code| *code == Some(red.code)));
             assert!(canvas.pixels.iter().all(|rgb| *rgb == red.rgb));
+            assert_eq!(canvas.background_code(), Some("F2"));
+            assert_eq!(canvas.background_label(), "正红（F2）");
             assert_eq!(canvas.undo_len(), undo_before + 1);
             assert_eq!(crate::pattern::counts(&canvas).get("F2"), Some(&area));
 
             assert_eq!(canvas.fill_background("正红").unwrap(), 0);
             assert_eq!(canvas.fill_background("F2").unwrap(), 0);
             assert_eq!(canvas.undo_len(), undo_before + 1);
+            assert_eq!(canvas.background_code(), Some("F2"));
 
             canvas.undo(1).unwrap();
             assert_eq!(canvas.codes(), &before_codes[..]);
             assert_eq!(canvas.pixels, before_pixels);
+            assert_eq!(canvas.background_code(), Some("H2"));
             assert_eq!(canvas.undo_len(), undo_before);
 
             let mut empty = Canvas::new_empty(3, 2, mode).unwrap();
             assert!(empty.codes().iter().all(Option::is_none));
+            assert_eq!(empty.background_code(), None);
+            assert_eq!(empty.background_label(), "空格");
             let white = palette::resolve_color(mode, "H2").unwrap();
             assert_eq!(empty.fill_background("雪白").unwrap(), 6);
             assert!(empty.codes().iter().all(|code| *code == Some("H2")));
+            assert_eq!(empty.background_code(), Some("H2"));
             assert!(empty.pixels.iter().all(|rgb| *rgb == white.rgb));
             let png = image::load_from_memory(&empty.encode_png_8x().unwrap())
                 .unwrap()
@@ -1387,6 +1461,7 @@ mod tests {
             assert_eq!(empty.undo_len(), 1);
             empty.undo(1).unwrap();
             assert!(empty.codes().iter().all(Option::is_none));
+            assert_eq!(empty.background_code(), None);
             let cleared = image::load_from_memory(&empty.encode_png_8x().unwrap())
                 .unwrap()
                 .to_rgba8();
@@ -1395,8 +1470,10 @@ mod tests {
             let mut white_canvas = Canvas::new(2, 2, mode).unwrap();
             assert_eq!(white_canvas.fill_background("h2").unwrap(), 0);
             assert_eq!(white_canvas.undo_len(), 0);
+            assert_eq!(white_canvas.background_code(), Some("H2"));
             assert_eq!(white_canvas.fill_background("中国红").unwrap(), 4);
             assert!(white_canvas.codes().iter().all(|code| *code == Some("F5")));
+            assert_eq!(white_canvas.background_code(), Some("F5"));
 
             let mut batched = Canvas::new(2, 2, mode).unwrap();
             batched
@@ -1407,10 +1484,12 @@ mod tests {
             assert!(batched.fill_background("nope").is_err());
             batched.end_batch();
             assert_eq!(batched.codes(), &prior[..]);
+            assert_eq!(batched.background_code(), Some("H2"));
             assert_eq!(batched.undo_len(), 1);
 
             batched.begin_batch();
             assert_eq!(batched.fill_background("明黄").unwrap(), 4);
+            assert_eq!(batched.background_code(), Some("A4"));
             batched
                 .paint(&[stamp(1, 1, "纯黑")], BrushSize::One)
                 .unwrap();
@@ -1427,7 +1506,73 @@ mod tests {
             assert_eq!(batched.codes()[3], Some("H7"));
             batched.undo(1).unwrap();
             assert_eq!(batched.codes(), &prior[..]);
+            assert_eq!(batched.background_code(), Some("H2"));
         }
+    }
+
+    #[test]
+    fn background_color_is_remembered_and_updated_by_refill() {
+        let mode = PaletteMode::Colors24;
+        let err = Canvas::new_with_color(0, 4, mode, "正红").unwrap_err();
+        assert!(matches!(err, CanvasError::InvalidSize { .. }));
+        let err = Canvas::new_with_color(2, 2, mode, "淡鹅黄").unwrap_err();
+        assert!(matches!(err, CanvasError::UnknownColor { .. }));
+        assert!(Canvas::new_with_color(2, 2, mode, "-").is_err());
+
+        let mut canvas = Canvas::new_with_color(2, 2, mode, "  正红 ").unwrap();
+        assert_eq!(canvas.undo_len(), 0);
+        assert_eq!(canvas.background_code(), Some("F2"));
+        assert!(canvas.codes().iter().all(|code| *code == Some("F2")));
+        assert!(canvas.pixels.iter().all(|rgb| *rgb == [0xFC, 0x3D, 0x46]));
+        // Painting does not retarget the remembered background.
+        canvas
+            .paint(&[stamp(0, 0, "纯黑")], BrushSize::One)
+            .unwrap();
+        assert_eq!(canvas.background_code(), Some("F2"));
+
+        // Every cell is already 中国红 only after a full overwrite. First paint the
+        // remaining cells the same color without fill_background, then refill.
+        canvas
+            .paint(
+                &[
+                    stamp(1, 0, "中国红"),
+                    stamp(0, 1, "中国红"),
+                    stamp(1, 1, "中国红"),
+                    stamp(0, 0, "中国红"),
+                ],
+                BrushSize::One,
+            )
+            .unwrap();
+        assert!(canvas.codes().iter().all(|code| *code == Some("F5")));
+        assert_eq!(canvas.background_code(), Some("F2"));
+        let undo_before = canvas.undo_len();
+        assert_eq!(canvas.fill_background("F5").unwrap(), 0);
+        assert_eq!(canvas.background_code(), Some("F5"));
+        assert_eq!(canvas.undo_len(), undo_before + 1);
+        canvas.undo(1).unwrap();
+        assert_eq!(canvas.background_code(), Some("F2"));
+        assert!(canvas.codes().iter().all(|code| *code == Some("F5")));
+
+        canvas.begin_batch();
+        assert_eq!(canvas.fill_background("纯黑").unwrap(), 4);
+        assert_eq!(canvas.background_code(), Some("H7"));
+        canvas.end_batch();
+        assert_eq!(canvas.undo_len(), undo_before + 1);
+        canvas.undo(1).unwrap();
+        assert_eq!(canvas.background_code(), Some("F2"));
+        assert!(canvas.codes().iter().all(|code| *code == Some("F5")));
+
+        // Cells already match the new color, so only the remembered color changes,
+        // and a batch still records that as one undo step.
+        canvas.begin_batch();
+        assert_eq!(canvas.fill_background("中国红").unwrap(), 0);
+        canvas.end_batch();
+        assert_eq!(canvas.background_code(), Some("F5"));
+        assert_eq!(canvas.undo_len(), undo_before + 1);
+        canvas.undo(1).unwrap();
+        assert_eq!(canvas.background_code(), Some("F2"));
+        assert!(canvas.codes().iter().all(|code| *code == Some("F5")));
+        assert_eq!(canvas.undo_len(), undo_before);
     }
 
     #[test]
