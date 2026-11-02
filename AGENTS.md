@@ -202,3 +202,17 @@
 | 灰玫 | M8 | 莫兰迪灰棕 | M9 | 莫兰迪灰紫 | M10 |
 | 灰紫红 | M11 | 深灰紫 | M12 | 灰橙 | M13 |
 | 灰红 | M14 | 莫兰迪中灰 | M15 |  |  |
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live as GitHub issues in `HHpetra/PixelDraw`, managed with the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Five canonical triage roles mapped to same-named labels (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context layout: `GLOSSARY.md` plus `docs/adr/` at the repo root. See `docs/agents/domain.md`.
