@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `fill_background`: replace every cell on the current canvas with one palette color (MARD code or Chinese name), overwriting existing artwork and empty cells. An unknown color is rejected and the canvas stays unchanged. A fill that changes nothing records no undo step; any real change is one undo step. The same operation is available in `draw_batch` as `type: fill_background`.
+
 ## 0.2.2
 
 - Ellipse and circle fills rasterize along the major axis and are clamped to a staircase that matches its own transpose, so `(rx, ry)` rotated by 90° now paints exactly the transposed cells of `(ry, rx)`. Tall ellipses used to come out as a 3px-wide banana while the same ellipse rotated stayed a thin lens.

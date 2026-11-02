@@ -12,7 +12,7 @@ PixelDraw itself needs no API key and exposes no network listener.
 
 PixelDraw gives an AI assistant a small drawing workspace. You describe what
 to draw in your MCP client; the assistant creates a canvas and draws with lines,
-rectangles, triangles, circles, ellipses, curves, flood fill or pixel stamps. After each pass it
+rectangles, triangles, circles, ellipses, curves, flood fill, a full-canvas background fill, or pixel stamps. After each pass it
 reviews the returned preview, keeps adjusting (undo is available), then saves when satisfied.
 
 - **Precise pixel placement:** draw on a 1..128 pixel-wide and -high canvas
@@ -203,7 +203,8 @@ Each file is saved atomically. `both` checks both names before writing, so exist
 | `draw_ellipse` | Ellipse; `fill` selects filled vs stroked, stroke uses `brush` width. |
 | `draw_curve` | Curve through `[x,y]` points: 2=line, 3=quadratic Bezier, 4=cubic Bezier, 5+=Catmull-Rom through every point. |
 | `flood_fill` | Four-connected fill of the seed's current bead code; empty cells are distinct from H2 white beads. Use `-` to clear a region back to empty. |
-| `draw_batch` | Ordered atomic batch; any failure rejects the whole batch; one final preview and one undo step. |
+| `fill_background` | Overwrites every cell with one palette color (MARD code or Chinese name), including empty cells and existing artwork. Invalid colors leave the canvas unchanged. One undo step when any cell changes; no step when the canvas is already that color. Also a `draw_batch` op. |
+| `draw_batch` | Ordered atomic batch; any failure rejects the whole batch; one final preview and one undo step. Ops include `fill_background`. |
 | `draw_pixels` | Whitespace-separated `x y color` triples; `-` clears a cell. |
 | `undo` | Reverses recent drawing steps (`steps` optional, default 1). Successful draws are one step each; `draw_batch` is one step; `create_canvas` clears history. |
 | `save_image` | Exports `pixel` (default), `pattern`, or `both` as PNG without overwriting existing files. |
@@ -216,6 +217,8 @@ Each file is saved atomically. `both` checks both names before writing, so exist
   the entire square must fit inside the canvas.
 - Invalid drawing batches leave the canvas unchanged. Repeated positions
   are applied in order. Colors use MARD codes or the active palette's Chinese names.
+- `fill_background` replaces every cell. It does not stop at a connected region
+  the way `flood_fill` does, and it does not accept `-`.
 - Circle/ellipse radii may extend past the canvas and are clipped (values above
   256 are treated as 256). Line ends,
   curve points, circle centers, and flood-fill seeds must stay inside the canvas.

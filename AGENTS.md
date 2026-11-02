@@ -17,8 +17,9 @@
    - `draw_ellipse({ cx, cy, rx, ry, color, fill, brush? })` 椭圆；`fill` 同上
    - `draw_curve({ points: [[x,y], ...], color, brush? })` 曲线；2 点直线、3 点二次贝塞尔、4 点三次贝塞尔、≥5 点过点平滑样条（Catmull-Rom）
    - `flood_fill({ x, y, color })` 油漆桶，四连通替换种子点同色号区域；空格与 H2 白豆分开处理；`color` 可用 `-` 清为空格
+   - `fill_background({ color })` 用当前色表的中文名或 MARD 色号强行覆盖整张图纸的每一个格子（已有画面、空格和其他颜色都会被替换）。与 `flood_fill` 不同，不停在色块边界，也不接受 `-`。颜色非法时画布不变；整张已是该颜色时不改动、不记 undo
    - `draw_pixels({ pixels: "0 0 正红 0 1 纯黑", brush? })` 散点/方块笔刷落点；用 `-` 清除为空格（不是 H2 白豆）
-   - `draw_batch({ ops })` 多笔有序批量；`ops` 项用 `type` 区分 line/rect/triangle/circle/ellipse/curve/flood_fill/pixels
+   - `draw_batch({ ops })` 多笔有序批量；`ops` 项用 `type` 区分 line/rect/triangle/circle/ellipse/curve/flood_fill/fill_background/pixels
 3. `list_colors` 只在需要查色时调用，**不是**作画必经步骤。
 4. 每次绘制工具都会返回当前图纸放大 8 倍（最近邻）后的 PNG；画完可以出图看看效果，再继续修改和调整。画错可用 `undo({ steps? })` 撤回；每次成功的绘制调用记一步，`draw_batch` 整批记一步，`create_canvas` 会清空历史。
 5. 完成后调用 `save_image({ filename?, output?: "pixel" | "pattern" | "both" })`。默认 `pixel` 为 8 倍像素画；`pattern` 为拼豆图纸（四边序号、逐格色号、自中心每 10 格计数线、色号与数量图例）；`both` 同时导出（第二张文件名加 `-pattern`）。空格留白不计数，H2 是白豆。保存到 `--output-dir` 目录，不覆盖已有文件；只接受文件名，不接受路径。
