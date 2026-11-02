@@ -143,6 +143,7 @@ fn stdio_draws_and_saves_outside_the_working_directory() {
     assert_eq!(
         names,
         [
+            "copy_region",
             "create_canvas",
             "draw_batch",
             "draw_circle",
@@ -155,6 +156,7 @@ fn stdio_draws_and_saves_outside_the_working_directory() {
             "fill_background",
             "flood_fill",
             "list_colors",
+            "move_region",
             "save_image",
             "undo"
         ]
@@ -651,5 +653,107 @@ fn stdio_create_canvas_background_color_updates_when_refilled() {
     assert!(
         remembered_text.contains("当前背景色为 正红（F2）"),
         "{remembered_text}"
+    );
+}
+
+#[test]
+fn stdio_move_region_changes_preview_and_pattern_codes() {
+    let output = tempfile::tempdir().unwrap();
+    let mut process = Process::spawn(
+        output.path(),
+        &[
+            std::ffi::OsStr::new("--output-dir"),
+            output.path().as_os_str(),
+        ],
+    );
+    process.request(
+        1,
+        "initialize",
+        json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "move-region-test", "version": "1"}
+        }),
+    );
+    process.send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+
+    let listed = process.request(2, "tools/list", json!({}));
+    let tools = listed["tools"].as_array().expect("tools array");
+    assert_eq!(tools.len(), 16);
+    let move_tool = tools
+        .iter()
+        .find(|tool| tool["name"] == "move_region")
+        .expect("move_region tool");
+    let required = move_tool["inputSchema"]["required"].as_array().unwrap();
+    for name in ["x0", "y0", "x1", "y1"] {
+        assert!(required.iter().any(|item| item == name), "{required:?}");
+    }
+    assert!(required.iter().all(|item| item != "dx" && item != "tx"));
+
+    let created = process.request(
+        3,
+        "tools/call",
+        json!({"name":"create_canvas","arguments":{"width":8,"height":8,"palette":"24"}}),
+    );
+    let blank = response_png(&created);
+    let drawn = process.request(
+        4,
+        "tools/call",
+        json!({
+            "name": "draw_pixels",
+            "arguments": {"pixels": "0 0 F5 1 0 H7 0 1 A4 1 1 - 3 0 C4"}
+        }),
+    );
+    let before = response_png(&drawn);
+    assert_ne!(before, blank);
+
+    let moved = process.request(
+        5,
+        "tools/call",
+        json!({
+            "name": "move_region",
+            "arguments": {"x0": 1, "y0": 1, "x1": 0, "y1": 0, "dx": 3, "dy": 1}
+        }),
+    );
+    assert_ne!(moved["isError"], true, "{moved}");
+    let text = moved["content"][0]["text"].as_str().unwrap();
+    assert_eq!(text, "已将 (0,0)-(1,1) 的内容移动到 (3,1)-(4,2)。");
+    let after = response_png(&moved);
+    assert_ne!(after, before);
+    let preview = image::load_from_memory(&after).unwrap().to_rgba8();
+    assert_eq!(preview.get_pixel(0, 0).0, [254, 255, 255, 255]);
+    assert_eq!(preview.get_pixel(8, 8).0, [254, 255, 255, 255]);
+    assert_eq!(preview.get_pixel(24, 0).0, [0x41, 0xCC, 0xFF, 255]);
+    assert_eq!(preview.get_pixel(24, 8).0, [0xE7, 0x00, 0x2F, 255]);
+    assert_eq!(preview.get_pixel(32, 8).0, [0, 0, 0, 255]);
+    assert_eq!(preview.get_pixel(24, 16).0, [0xFB, 0xED, 0x56, 255]);
+    assert_eq!(preview.get_pixel(32, 16).0[3], 0);
+
+    process.request(
+        6,
+        "tools/call",
+        json!({"name":"save_image","arguments":{"filename":"moved","output":"pattern"}}),
+    );
+    process.request(
+        7,
+        "tools/call",
+        json!({"name":"create_canvas","arguments":{"width":8,"height":8,"palette":"24"}}),
+    );
+    process.request(
+        8,
+        "tools/call",
+        json!({
+            "name": "draw_pixels",
+            "arguments": {"pixels": "3 0 C4 3 1 F5 4 1 H7 3 2 A4 4 2 -"}
+        }),
+    );
+    process.request(
+        9,
+        "tools/call",
+        json!({"name":"save_image","arguments":{"filename":"moved-control","output":"pattern"}}),
+    );
+    assert_eq!(
+        std::fs::read(output.path().join("moved.png")).unwrap(),
+        std::fs::read(output.path().join("moved-control.png")).unwrap()
     );
 }

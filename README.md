@@ -204,7 +204,9 @@ Each file is saved atomically. `both` checks both names before writing, so exist
 | `draw_curve` | Curve through `[x,y]` points: 2=line, 3=quadratic Bezier, 4=cubic Bezier, 5+=Catmull-Rom through every point. |
 | `flood_fill` | Four-connected fill of the seed's current bead code; empty cells are distinct from H2 white beads. Use `-` to clear a region back to empty. |
 | `fill_background` | Overwrites every cell with one palette color (MARD code or Chinese name), including empty cells and existing artwork, and sets the remembered background color to that color. Invalid colors leave the canvas and its background color unchanged. One undo step when any cell changes or the remembered color differs; no step when both already match. Undo restores the previous background color. Also a `draw_batch` op. |
-| `draw_batch` | Ordered atomic batch; any failure rejects the whole batch; one final preview and one undo step. Ops include `fill_background`. |
+| `move_region` | Moves an inclusive rectangle (reversed corners are normalized). Address with relative `dx`/`dy` or absolute destination top-left `tx`/`ty`, exactly one pair. Empty cells move with the block. The source is filled with the current background bead, or left empty when the background is empty. The remembered background color is unchanged. A source endpoint or destination rectangle outside the canvas rejects the call. No undo step when the move would not change any cell. Also a `draw_batch` op. |
+| `copy_region` | Same parameters as `move_region`. The source stays, and empty cells overwrite the destination. |
+| `draw_batch` | Ordered atomic batch; any failure rejects the whole batch; one final preview and one undo step. Ops include `fill_background`, `move_region`, and `copy_region`. |
 | `draw_pixels` | Whitespace-separated `x y color` triples; `-` clears a cell. |
 | `undo` | Reverses recent drawing steps (`steps` optional, default 1). Successful draws are one step each; `draw_batch` is one step; `create_canvas` clears history. |
 | `save_image` | Exports `pixel` (default), `pattern`, or `both` as PNG without overwriting existing files. |
@@ -222,6 +224,9 @@ Each file is saved atomically. `both` checks both names before writing, so exist
 - Circle/ellipse radii may extend past the canvas and are clipped (values above
   256 are treated as 256). Line ends,
   curve points, circle centers, and flood-fill seeds must stay inside the canvas.
+  A region move or copy is rejected entirely when a source endpoint or the
+  destination rectangle falls outside the canvas; the canvas and undo history
+  stay unchanged.
 - Only one canvas is held in memory per server instance. Restarting loses
   unsaved work. Undo is in-memory only (up to 64 steps) and is cleared by
   `create_canvas`. There is no import, session persistence, or native-size export.

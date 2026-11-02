@@ -15,7 +15,7 @@ use serde::Deserialize;
 use tempfile::NamedTempFile;
 use tokio::sync::Mutex;
 
-use crate::canvas::{BrushSize, Canvas, CanvasError, PixelUpdate};
+use crate::canvas::{BrushSize, Canvas, CanvasError, PixelUpdate, RegionOutcome};
 use crate::palette::{self, PaletteMode};
 use crate::pattern;
 
@@ -203,6 +203,30 @@ pub struct FillBackgroundRequest {
     pub color: String,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RegionRequest {
+    /// 源区域起点 X，含端点，可大于 x1，自动归一化
+    pub x0: u32,
+    /// 源区域起点 Y
+    pub y0: u32,
+    /// 源区域终点 X
+    pub x1: u32,
+    /// 源区域终点 Y
+    pub y1: u32,
+    /// 相对位移 X，可负。与 tx/ty 互斥，必须且只能给一组。
+    #[serde(default)]
+    pub dx: Option<i32>,
+    /// 相对位移 Y，可负。与 tx/ty 互斥。
+    #[serde(default)]
+    pub dy: Option<i32>,
+    /// 目标区域左上角绝对 X。与 dx/dy 互斥。
+    #[serde(default)]
+    pub tx: Option<i32>,
+    /// 目标区域左上角绝对 Y。与 dx/dy 互斥。
+    #[serde(default)]
+    pub ty: Option<i32>,
+}
+
 /// One drawing step inside `draw_batch`. Discriminated by `type`.
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -273,6 +297,36 @@ pub enum DrawOp {
     FloodFill { x: u32, y: u32, color: String },
     /// 填充背景：用 color 覆盖每一个格子，强行替换已有内容
     FillBackground { color: String },
+    /// 移动区域：源矩形整块搬到目标，源区域改回当前背景色
+    MoveRegion {
+        x0: u32,
+        y0: u32,
+        x1: u32,
+        y1: u32,
+        #[serde(default)]
+        dx: Option<i32>,
+        #[serde(default)]
+        dy: Option<i32>,
+        #[serde(default)]
+        tx: Option<i32>,
+        #[serde(default)]
+        ty: Option<i32>,
+    },
+    /// 复制区域：源矩形整块覆盖目标，源区域保留
+    CopyRegion {
+        x0: u32,
+        y0: u32,
+        x1: u32,
+        y1: u32,
+        #[serde(default)]
+        dx: Option<i32>,
+        #[serde(default)]
+        dy: Option<i32>,
+        #[serde(default)]
+        tx: Option<i32>,
+        #[serde(default)]
+        ty: Option<i32>,
+    },
     /// 与 draw_pixels 相同的点阵/方块笔刷落点
     Pixels {
         pixels: String,
@@ -364,7 +418,7 @@ impl PixelDraw {
         let png = encode_or_internal(guard.as_ref().expect("canvas just stored"))?;
         image_result(
             format!(
-                "已创建 {width}x{height} 像素图纸，背景为 {label}，已锁定 {} 色模式。直接用 draw_line / draw_rect / draw_triangle / draw_circle / draw_ellipse / draw_curve / flood_fill / fill_background / draw_pixels 画出图形；需要查色时再 list_colors。画完可查看返回的预览图，再继续修改和调整；画错可用 undo 撤回。绘制中途不能切换色表。fill_background 会把当前背景色更新为新的颜色。",
+                "已创建 {width}x{height} 像素图纸，背景为 {label}，已锁定 {} 色模式。直接用 draw_line / draw_rect / draw_triangle / draw_circle / draw_ellipse / draw_curve / flood_fill / fill_background / draw_pixels / move_region / copy_region 画出图形；需要查色时再 list_colors。画完可查看返回的预览图，再继续修改和调整；画错可用 undo 撤回。绘制中途不能切换色表。fill_background 会把当前背景色更新为新的颜色。",
                 mode.as_str()
             ),
             png,
@@ -658,7 +712,63 @@ impl PixelDraw {
     }
 
     #[tool(
-        description = "批量绘制：将多条有序操作一次提交、原子执行，只返回最终一张预览。适合需要多笔时一次画完，避免并行调用多个绘制工具造成顺序混乱。ops 数组按顺序执行，每项用 type 区分：line / rect / triangle / circle / ellipse / curve / flood_fill / fill_background / pixels（参数与对应单笔工具相同）。任一步非法则整批拒绝且画布不变。成功时整批只记一次 undo。最多 256 步。尽量使用像素绘制；大面积再用本工具的图元。"
+        description = "移动一块矩形区域。源区域 (x0,y0)-(x1,y1) 含端点，反序会自动归一化。整块读取（含空格）后再把源区域改回当前背景色并写入目标，因此重叠搬运（如右移 1 格）结果正确；背景为空格时源区域留空格。不改变已记录的背景色。寻址必须且只能给一组：相对位移 dx、dy（可负），或目标左上角绝对坐标 tx、ty。源端点越界或目标区域越界时整次拒绝，画布不变、不记 undo。内容与搬运结果逐格相同时不改画布、不记 undo。返回 8 倍放大 PNG。"
+    )]
+    async fn move_region(
+        &self,
+        Parameters(request): Parameters<RegionRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.apply_region(request, true).await
+    }
+
+    #[tool(
+        description = "复制一块矩形区域。参数与 move_region 相同：源区域含端点，反序自动归一化；整块读取（含空格）后覆盖目标，源区域保留。空格会覆盖目标原有内容。寻址必须且只能给一组：相对位移 dx、dy（可负），或目标左上角绝对坐标 tx、ty。源端点越界或目标区域越界时整次拒绝，画布不变、不记 undo。内容与搬运结果逐格相同时不改画布、不记 undo。不改变已记录的背景色。返回 8 倍放大 PNG。"
+    )]
+    async fn copy_region(
+        &self,
+        Parameters(request): Parameters<RegionRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.apply_region(request, false).await
+    }
+
+    async fn apply_region(
+        &self,
+        RegionRequest {
+            x0,
+            y0,
+            x1,
+            y1,
+            dx,
+            dy,
+            tx,
+            ty,
+        }: RegionRequest,
+        erase_source: bool,
+    ) -> Result<CallToolResult, McpError> {
+        let mut guard = self.canvas.lock().await;
+        let Some(canvas) = guard.as_mut() else {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(
+                "尚未创建图纸。请先调用 create_canvas。",
+            )]));
+        };
+        let outcome = if erase_source {
+            canvas.move_region(x0, y0, x1, y1, dx, dy, tx, ty)
+        } else {
+            canvas.copy_region(x0, y0, x1, y1, dx, dy, tx, ty)
+        };
+        match outcome {
+            Ok(outcome) => {
+                let png = encode_or_internal(canvas)?;
+                image_result(region_message(&outcome, !erase_source), png)
+            }
+            Err(err) => Ok(CallToolResult::error(vec![ContentBlock::text(
+                err.to_string(),
+            )])),
+        }
+    }
+
+    #[tool(
+        description = "批量绘制：将多条有序操作一次提交、原子执行，只返回最终一张预览。适合需要多笔时一次画完，避免并行调用多个绘制工具造成顺序混乱。ops 数组按顺序执行，每项用 type 区分：line / rect / triangle / circle / ellipse / curve / flood_fill / fill_background / pixels / move_region / copy_region（参数与对应单笔工具相同）。任一步非法则整批拒绝且画布不变。成功时整批只记一次 undo。最多 256 步。尽量使用像素绘制；大面积再用本工具的图元。"
     )]
     async fn draw_batch(
         &self,
@@ -801,7 +911,7 @@ impl ServerHandler for PixelDraw {
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(
-                "PixelDraw：用强约束像素指令绘图，不要直接文生图。尽量使用像素绘制；其他图元仅用于大面积绘制。多笔绘制请一次调用 draw_batch（ops 有序数组，原子执行，只回最终预览）；单笔可用 draw_line / draw_rect / draw_triangle / draw_circle / draw_ellipse / draw_curve / flood_fill / fill_background / draw_pixels。禁止并行调用多个绘制工具，会打乱顺序。流程：create_canvas(width, height, palette?, background?, background_color?) 建图并锁定色表 → draw_batch 或单笔工具作画 → 看 8 倍预览继续修改调整（画错可用 undo 撤回）→ save_image 保存。矩形、三角形、圆、椭圆用 fill=true|false 区分填充/描边；直线、曲线与描边可用 brush=1|2|4|8 控制线宽（从落点向右下扩展 N×N，与 draw_pixels 足迹一致）。draw_curve 的 points 为 [x,y] 列表：2 点直线、3 点二次贝塞尔、4 点三次贝塞尔、≥5 点过点平滑样条。fill_background 用一种颜色覆盖整张图纸的每一个格子，并把当前背景色改为该颜色。draw_pixels 与 flood_fill 可用 - 清除为空格（不是 H2 白豆）；background 可选 white（默认）或 empty；background_color 可选，用色表颜色铺满并记为当前背景色。list_colors 只在需要查色时调用。颜色只用当前模式的中文名或 MARD 色号。save_image 的 output 可选 pixel（默认 8 倍 PNG）、pattern（拼豆图纸）或 both；不覆盖已有文件。",
+                "PixelDraw：用强约束像素指令绘图，不要直接文生图。尽量使用像素绘制；其他图元仅用于大面积绘制。多笔绘制请一次调用 draw_batch（ops 有序数组，原子执行，只回最终预览）；单笔可用 draw_line / draw_rect / draw_triangle / draw_circle / draw_ellipse / draw_curve / flood_fill / fill_background / draw_pixels / move_region / copy_region。禁止并行调用多个绘制工具，会打乱顺序。流程：create_canvas(width, height, palette?, background?, background_color?) 建图并锁定色表 → draw_batch 或单笔工具作画 → 看 8 倍预览继续修改调整（画错可用 undo 撤回）→ save_image 保存。矩形、三角形、圆、椭圆用 fill=true|false 区分填充/描边；直线、曲线与描边可用 brush=1|2|4|8 控制线宽（从落点向右下扩展 N×N，与 draw_pixels 足迹一致）。draw_curve 的 points 为 [x,y] 列表：2 点直线、3 点二次贝塞尔、4 点三次贝塞尔、≥5 点过点平滑样条。fill_background 用一种颜色覆盖整张图纸的每一个格子，并把当前背景色改为该颜色。move_region 把矩形区域（含空格）搬到 dx/dy 或 tx/ty 指定的位置，源区域改回当前背景色；copy_region 同样搬运但保留源区域。两组寻址只能给一组，源端点或目标越界整次拒绝。draw_pixels 与 flood_fill 可用 - 清除为空格（不是 H2 白豆）；background 可选 white（默认）或 empty；background_color 可选，用色表颜色铺满并记为当前背景色。list_colors 只在需要查色时调用。颜色只用当前模式的中文名或 MARD 色号。save_image 的 output 可选 pixel（默认 8 倍 PNG）、pattern（拼豆图纸）或 both；不覆盖已有文件。",
             )
     }
 }
@@ -879,6 +989,30 @@ fn apply_draw_op(canvas: &mut Canvas, op: &DrawOp) -> Result<usize, CanvasError>
         }
         DrawOp::FloodFill { x, y, color } => canvas.flood_fill(*x, *y, color),
         DrawOp::FillBackground { color } => canvas.fill_background(color),
+        DrawOp::MoveRegion {
+            x0,
+            y0,
+            x1,
+            y1,
+            dx,
+            dy,
+            tx,
+            ty,
+        } => canvas
+            .move_region(*x0, *y0, *x1, *y1, *dx, *dy, *tx, *ty)
+            .map(|outcome| outcome.written),
+        DrawOp::CopyRegion {
+            x0,
+            y0,
+            x1,
+            y1,
+            dx,
+            dy,
+            tx,
+            ty,
+        } => canvas
+            .copy_region(*x0, *y0, *x1, *y1, *dx, *dy, *tx, *ty)
+            .map(|outcome| outcome.written),
         DrawOp::Pixels { pixels, brush } => {
             let updates =
                 parse_pixels(pixels).map_err(|message| CanvasError::InvalidOp { message })?;
@@ -892,6 +1026,24 @@ fn encode_or_internal(canvas: &Canvas) -> Result<Vec<u8>, McpError> {
     canvas
         .encode_png_8x()
         .map_err(|err| McpError::internal_error(format!("PNG 编码失败: {err}"), None))
+}
+
+fn region_message(outcome: &RegionOutcome, copy: bool) -> String {
+    if !outcome.changed {
+        return "内容无变化：源区域与目标内容一致，未修改画布。".to_string();
+    }
+    let verb = if copy { "复制到" } else { "移动到" };
+    format!(
+        "已将 ({},{})-({},{}) 的内容{verb} ({},{})-({},{})。",
+        outcome.x0,
+        outcome.y0,
+        outcome.x1,
+        outcome.y1,
+        outcome.nx0,
+        outcome.ny0,
+        outcome.nx1,
+        outcome.ny1
+    )
 }
 
 fn image_result(text: impl Into<String>, png: Vec<u8>) -> Result<CallToolResult, McpError> {
@@ -2318,5 +2470,275 @@ mod tests {
             server.canvas.lock().await.as_ref().unwrap().codes()[0],
             Some("H7")
         );
+    }
+
+    #[allow(clippy::too_many_arguments)] // Mirrors RegionRequest fields.
+    fn region(
+        x0: u32,
+        y0: u32,
+        x1: u32,
+        y1: u32,
+        dx: Option<i32>,
+        dy: Option<i32>,
+        tx: Option<i32>,
+        ty: Option<i32>,
+    ) -> RegionRequest {
+        RegionRequest {
+            x0,
+            y0,
+            x1,
+            y1,
+            dx,
+            dy,
+            tx,
+            ty,
+        }
+    }
+
+    fn tool_text(result: &CallToolResult) -> &str {
+        &result.content[0].as_text().unwrap().text
+    }
+
+    #[tokio::test]
+    async fn region_address_requires_one_pair_and_a_canvas() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = PixelDraw::new(dir.path().to_path_buf());
+        let missing = server
+            .move_region(Parameters(region(0, 0, 0, 0, Some(1), Some(0), None, None)))
+            .await
+            .unwrap();
+        assert_eq!(missing.is_error, Some(true));
+        assert!(tool_text(&missing).contains("尚未创建图纸"));
+        let missing_copy = server
+            .copy_region(Parameters(region(0, 0, 0, 0, None, None, Some(0), Some(0))))
+            .await
+            .unwrap();
+        assert!(tool_text(&missing_copy).contains("尚未创建图纸"));
+
+        create(&server).await;
+        server
+            .draw_pixels(Parameters(DrawPixelsRequest {
+                pixels: "0 0 正红".into(),
+                brush: Some(1),
+            }))
+            .await
+            .unwrap();
+        let before_codes = server
+            .canvas
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .codes()
+            .to_vec();
+        let undo = server.canvas.lock().await.as_ref().unwrap().undo_len();
+        let background = server
+            .canvas
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .background_code();
+
+        let address = "「dx,dy」与「tx,ty」只能给一组：相对位移填 dx/dy，绝对目标填 tx/ty。";
+        for (dx, dy, tx, ty) in [
+            (Some(1), Some(0), Some(1), Some(0)),
+            (None, None, None, None),
+            (Some(1), None, None, None),
+            (None, Some(0), Some(1), None),
+        ] {
+            for copy in [false, true] {
+                let result = if copy {
+                    server
+                        .copy_region(Parameters(region(0, 0, 0, 0, dx, dy, tx, ty)))
+                        .await
+                        .unwrap()
+                } else {
+                    server
+                        .move_region(Parameters(region(0, 0, 0, 0, dx, dy, tx, ty)))
+                        .await
+                        .unwrap()
+                };
+                assert_eq!(result.is_error, Some(true));
+                assert_eq!(tool_text(&result), address);
+            }
+        }
+        assert_eq!(
+            server.canvas.lock().await.as_ref().unwrap().codes(),
+            before_codes
+        );
+        assert_eq!(
+            server.canvas.lock().await.as_ref().unwrap().undo_len(),
+            undo
+        );
+        assert_eq!(
+            server
+                .canvas
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .background_code(),
+            background
+        );
+
+        let moved = server
+            .move_region(Parameters(region(0, 0, 0, 0, Some(1), Some(0), None, None)))
+            .await
+            .unwrap();
+        assert_ne!(moved.is_error, Some(true));
+        assert_eq!(
+            tool_text(&moved),
+            "已将 (0,0)-(0,0) 的内容移动到 (1,0)-(1,0)。"
+        );
+        let copied = server
+            .copy_region(Parameters(region(1, 0, 1, 0, None, None, Some(2), Some(0))))
+            .await
+            .unwrap();
+        assert_eq!(
+            tool_text(&copied),
+            "已将 (1,0)-(1,0) 的内容复制到 (2,0)-(2,0)。"
+        );
+        let unchanged = server
+            .move_region(Parameters(region(3, 3, 3, 3, Some(0), Some(0), None, None)))
+            .await
+            .unwrap();
+        assert_ne!(unchanged.is_error, Some(true));
+        assert_eq!(
+            tool_text(&unchanged),
+            "内容无变化：源区域与目标内容一致，未修改画布。"
+        );
+        assert!(unchanged.content[1].as_image().is_some());
+        assert_eq!(server.canvas.lock().await.as_ref().unwrap().undo_len(), 3);
+    }
+
+    #[tokio::test]
+    async fn draw_batch_move_region_preserves_order_and_rejects_as_one_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = PixelDraw::new(dir.path().to_path_buf());
+        create(&server).await;
+        server
+            .draw_pixels(Parameters(DrawPixelsRequest {
+                pixels: "0 0 正红\n1 0 纯黑".into(),
+                brush: Some(1),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(server.canvas.lock().await.as_ref().unwrap().undo_len(), 1);
+
+        let batched = server
+            .draw_batch(Parameters(DrawBatchRequest {
+                ops: vec![
+                    DrawOp::MoveRegion {
+                        x0: 0,
+                        y0: 0,
+                        x1: 1,
+                        y1: 0,
+                        dx: Some(2),
+                        dy: Some(0),
+                        tx: None,
+                        ty: None,
+                    },
+                    DrawOp::Pixels {
+                        pixels: "2 0 明黄".into(),
+                        brush: Some(1),
+                    },
+                ],
+            }))
+            .await
+            .unwrap();
+        assert_ne!(batched.is_error, Some(true));
+        let codes = server
+            .canvas
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .codes()
+            .to_vec();
+        assert_eq!(codes[0], Some("H2"));
+        assert_eq!(codes[1], Some("H2"));
+        // pixels runs after the move, so it overwrites the transplanted 正红.
+        assert_eq!(codes[2], Some("A4"));
+        assert_eq!(codes[3], Some("H7"));
+        assert_eq!(server.canvas.lock().await.as_ref().unwrap().undo_len(), 2);
+
+        server
+            .undo(Parameters(UndoRequest { steps: Some(1) }))
+            .await
+            .unwrap();
+        assert_eq!(
+            server.canvas.lock().await.as_ref().unwrap().codes()[0],
+            Some("F2")
+        );
+        assert_eq!(
+            server.canvas.lock().await.as_ref().unwrap().codes()[1],
+            Some("H7")
+        );
+        assert_eq!(
+            server.canvas.lock().await.as_ref().unwrap().codes()[2],
+            Some("H2")
+        );
+        assert_eq!(server.canvas.lock().await.as_ref().unwrap().undo_len(), 1);
+
+        let before = server
+            .canvas
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .codes()
+            .to_vec();
+        let bad = server
+            .draw_batch(Parameters(DrawBatchRequest {
+                ops: vec![
+                    DrawOp::MoveRegion {
+                        x0: 0,
+                        y0: 0,
+                        x1: 1,
+                        y1: 0,
+                        dx: Some(2),
+                        dy: Some(0),
+                        tx: None,
+                        ty: None,
+                    },
+                    DrawOp::Pixels {
+                        pixels: "2 0 彩虹".into(),
+                        brush: Some(1),
+                    },
+                ],
+            }))
+            .await
+            .unwrap();
+        assert_eq!(bad.is_error, Some(true));
+        assert!(tool_text(&bad).contains("批量第 2 步失败"));
+        assert_eq!(server.canvas.lock().await.as_ref().unwrap().codes(), before);
+        assert_eq!(server.canvas.lock().await.as_ref().unwrap().undo_len(), 1);
+
+        let bad_move = server
+            .draw_batch(Parameters(DrawBatchRequest {
+                ops: vec![
+                    DrawOp::Pixels {
+                        pixels: "0 0 纯黑".into(),
+                        brush: Some(1),
+                    },
+                    DrawOp::CopyRegion {
+                        x0: 0,
+                        y0: 0,
+                        x1: 0,
+                        y1: 0,
+                        dx: None,
+                        dy: None,
+                        tx: Some(-1),
+                        ty: Some(0),
+                    },
+                ],
+            }))
+            .await
+            .unwrap();
+        assert_eq!(bad_move.is_error, Some(true));
+        assert!(tool_text(&bad_move).contains("目标区域越界"));
+        assert_eq!(server.canvas.lock().await.as_ref().unwrap().codes(), before);
+        assert_eq!(server.canvas.lock().await.as_ref().unwrap().undo_len(), 1);
     }
 }
