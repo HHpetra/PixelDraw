@@ -3,6 +3,8 @@
 ## Unreleased
 
 - `fill_background`: replace every cell on the current canvas with one palette color (MARD code or Chinese name), overwriting existing artwork and empty cells. An unknown color is rejected and the canvas stays unchanged. A fill that changes nothing records no undo step; any real change is one undo step. The same operation is available in `draw_batch` as `type: fill_background`.
+- `create_canvas` accepts optional `background_color` (Chinese name or MARD code). Omitting it keeps `background: white` (H2 beads) and `background: empty` (no beads). When set, every cell starts as that bead and the canvas remembers it as the current background color. `background: empty` cannot be combined with `background_color`. An unknown color does not replace an existing canvas.
+- `fill_background` updates that remembered background color to the new color, including when every cell was already that color but the remembered color differed. Undo restores the previous background color together with the cells. A fill that changes neither the cells nor the remembered color still records no undo step.
 
 ## 0.2.2
 

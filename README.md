@@ -184,7 +184,7 @@ draw_pixels   {"pixels":"2 0 -"}
 save_image    {"filename":"cat.png","output":"both"}
 ```
 
-The default `background: "white"` fills the canvas with H2 beads. `empty` starts without beads. Use `-` to clear cells, with the same brushes and batch validation as painting. H2 always means a real white bead; empty cells have no code label and are excluded from totals. The example uses two beads. No white region is automatically removed as background.
+The default `background: "white"` fills the canvas with H2 beads. `empty` starts without beads. Optional `background_color` (a MARD code or Chinese name) fills every cell with that bead and remembers it as the current background color; omit it to keep the white or empty default. `background: "empty"` cannot be combined with `background_color`. Use `-` to clear cells, with the same brushes and batch validation as painting. H2 always means a real white bead; empty cells have no code label and are excluded from totals. The example uses two beads. No white region is automatically removed as background.
 
 Both exports use the same snapshot with canonical bead codes and occupancy, never RGB-to-code inference. Overlapping strokes count only the final cells.
 
@@ -194,7 +194,7 @@ Each file is saved atomically. `both` checks both names before writing, so exist
 
 | Tool | Behavior |
 | --- | --- |
-| `create_canvas` | Canvas (`background`: `white` default beads or `empty`), width/height 1..128; locks palette 24, 144 or 221 (default). Successful recreation replaces the old canvas. |
+| `create_canvas` | Canvas (`background`: `white` default beads or `empty`). Optional `background_color` fills every cell with that palette color and stores it as the current background; omitting it preserves the white/empty default. `empty` cannot be combined with `background_color`. Width/height 1..128; locks palette 24, 144 or 221 (default). A successful call replaces the current canvas. An unknown color does not. |
 | `list_colors` | Lists the locked palette, or a requested palette before creation. Optional lookup only. |
 | `draw_line` | Line; `brush` is stroke width 1/2/4/8, coordinates need not align to a grid. |
 | `draw_rect` | Rectangle; `fill` selects filled vs stroked, stroke uses `brush` width. |
@@ -203,7 +203,7 @@ Each file is saved atomically. `both` checks both names before writing, so exist
 | `draw_ellipse` | Ellipse; `fill` selects filled vs stroked, stroke uses `brush` width. |
 | `draw_curve` | Curve through `[x,y]` points: 2=line, 3=quadratic Bezier, 4=cubic Bezier, 5+=Catmull-Rom through every point. |
 | `flood_fill` | Four-connected fill of the seed's current bead code; empty cells are distinct from H2 white beads. Use `-` to clear a region back to empty. |
-| `fill_background` | Overwrites every cell with one palette color (MARD code or Chinese name), including empty cells and existing artwork. Invalid colors leave the canvas unchanged. One undo step when any cell changes; no step when the canvas is already that color. Also a `draw_batch` op. |
+| `fill_background` | Overwrites every cell with one palette color (MARD code or Chinese name), including empty cells and existing artwork, and sets the remembered background color to that color. Invalid colors leave the canvas and its background color unchanged. One undo step when any cell changes or the remembered color differs; no step when both already match. Undo restores the previous background color. Also a `draw_batch` op. |
 | `draw_batch` | Ordered atomic batch; any failure rejects the whole batch; one final preview and one undo step. Ops include `fill_background`. |
 | `draw_pixels` | Whitespace-separated `x y color` triples; `-` clears a cell. |
 | `undo` | Reverses recent drawing steps (`steps` optional, default 1). Successful draws are one step each; `draw_batch` is one step; `create_canvas` clears history. |
@@ -217,8 +217,8 @@ Each file is saved atomically. `both` checks both names before writing, so exist
   the entire square must fit inside the canvas.
 - Invalid drawing batches leave the canvas unchanged. Repeated positions
   are applied in order. Colors use MARD codes or the active palette's Chinese names.
-- `fill_background` replaces every cell. It does not stop at a connected region
-  the way `flood_fill` does, and it does not accept `-`.
+- `fill_background` replaces every cell and updates the remembered background color. It does not stop at a connected region
+  the way `flood_fill` does, and it does not accept `-`. Undo restores the previous background color with the cells.
 - Circle/ellipse radii may extend past the canvas and are clipped (values above
   256 are treated as 256). Line ends,
   curve points, circle centers, and flood-fill seeds must stay inside the canvas.

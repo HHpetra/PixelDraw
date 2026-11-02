@@ -52,6 +52,9 @@ pub struct CreateCanvasRequest {
     /// 背景：white（默认，H2 白豆）或 empty（空格，不放豆）。
     #[serde(default)]
     pub background: Background,
+    /// 可选背景颜色（当前色表的中文名或 MARD 色号）。省略则沿用 background。指定后整张铺该色豆，并记为当前背景色。不能与 background 为 empty 同时使用。
+    #[serde(default)]
+    pub background_color: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
@@ -313,7 +316,7 @@ impl PixelDraw {
     }
 
     #[tool(
-        description = "创建指定尺寸的像素图纸。background 可选 white（默认，H2 白豆）或 empty（透明空格，不计豆数）。宽和高必须在 1 到 128 之间。(0,0) 为左上角。palette 为色表模式：\"24\"、\"144\" 或 \"221\"，默认 \"221\"。色表在创建时锁定，绘制中途不可更改；要换色表请重新 create_canvas（会覆盖当前图纸）。返回放大 8 倍后的 PNG。"
+        description = "创建指定尺寸的像素图纸。background 可选 white（默认，H2 白豆）或 empty（透明空格，不计豆数）。可选 background_color 为当前色表的中文名或 MARD 色号：整张铺该色豆，并记为当前背景色；省略时与只传 background 相同。background 为 empty 时不能同时传 background_color。之后 fill_background 会把当前背景色改成新颜色。宽和高必须在 1 到 128 之间。(0,0) 为左上角。palette 为色表模式：\"24\"、\"144\" 或 \"221\"，默认 \"221\"。色表在创建时锁定，绘制中途不可更改；要换色表请重新 create_canvas（会覆盖当前图纸）。颜色非法时不创建、不覆盖已有图纸。返回放大 8 倍后的 PNG。"
     )]
     async fn create_canvas(
         &self,
@@ -322,6 +325,7 @@ impl PixelDraw {
             height,
             palette,
             background,
+            background_color,
         }): Parameters<CreateCanvasRequest>,
     ) -> Result<CallToolResult, McpError> {
         let mode = match PaletteMode::parse(palette.as_deref()) {
@@ -330,10 +334,23 @@ impl PixelDraw {
                 return Ok(CallToolResult::error(vec![ContentBlock::text(err)]));
             }
         };
-        let canvas = match match background {
-            Background::White => Canvas::new(width, height, mode),
-            Background::Empty => Canvas::new_empty(width, height, mode),
-        } {
+        let background_color = background_color
+            .as_deref()
+            .map(str::trim)
+            .filter(|color| !color.is_empty());
+        if matches!(background, Background::Empty) && background_color.is_some() {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(
+                "background 为 empty 时不能同时指定 background_color。empty 表示不放豆；要设置背景颜色请传入 background_color，并省略 background 或设为 white。",
+            )]));
+        }
+        let canvas = match background_color {
+            Some(color) => Canvas::new_with_color(width, height, mode, color),
+            None => match background {
+                Background::White => Canvas::new(width, height, mode),
+                Background::Empty => Canvas::new_empty(width, height, mode),
+            },
+        };
+        let canvas = match canvas {
             Ok(canvas) => canvas,
             Err(err) => {
                 return Ok(CallToolResult::error(vec![ContentBlock::text(
@@ -341,12 +358,13 @@ impl PixelDraw {
                 )]));
             }
         };
+        let label = canvas.background_label();
         let mut guard = self.canvas.lock().await;
         *guard = Some(canvas);
         let png = encode_or_internal(guard.as_ref().expect("canvas just stored"))?;
         image_result(
             format!(
-                "已创建 {width}x{height} 像素图纸，背景为 {background:?}，已锁定 {} 色模式。直接用 draw_line / draw_rect / draw_triangle / draw_circle / draw_ellipse / draw_curve / flood_fill / fill_background / draw_pixels 画出图形；需要查色时再 list_colors。画完可查看返回的预览图，再继续修改和调整；画错可用 undo 撤回。绘制中途不能切换色表。",
+                "已创建 {width}x{height} 像素图纸，背景为 {label}，已锁定 {} 色模式。直接用 draw_line / draw_rect / draw_triangle / draw_circle / draw_ellipse / draw_curve / flood_fill / fill_background / draw_pixels 画出图形；需要查色时再 list_colors。画完可查看返回的预览图，再继续修改和调整；画错可用 undo 撤回。绘制中途不能切换色表。fill_background 会把当前背景色更新为新的颜色。",
                 mode.as_str()
             ),
             png,
@@ -607,7 +625,7 @@ impl PixelDraw {
     }
 
     #[tool(
-        description = "填充背景颜色：用 color 强行覆盖当前图纸的每一个格子，已有画面、空格和其他颜色都会被替换。需要已创建图纸。color 为当前锁定色表的中文名或 MARD 色号；不接受 -。颜色非法时画布不变。与 flood_fill 不同，本工具不看种子点，也不停在色块边界。有格子发生变化时记一次 undo；整张已是该颜色时不改动、不记步。返回 8 倍放大 PNG。"
+        description = "填充背景颜色：用 color 强行覆盖当前图纸的每一个格子，已有画面、空格和其他颜色都会被替换，并把已记录的当前背景色改为该颜色。需要已创建图纸。color 为当前锁定色表的中文名或 MARD 色号；不接受 -。颜色非法时画布不变，背景色也不变。与 flood_fill 不同，本工具不看种子点，也不停在色块边界。有格子变化，或当前背景色与新颜色不同时，记一次 undo。格子和背景色都已是该颜色时不改动、不记步。undo 会一并恢复之前的背景色。返回 8 倍放大 PNG。"
     )]
     async fn fill_background(
         &self,
@@ -621,13 +639,14 @@ impl PixelDraw {
         };
         match canvas.fill_background(&color) {
             Ok(count) => {
+                let label = canvas.background_label();
                 let png = encode_or_internal(canvas)?;
                 let width = canvas.width();
                 let height = canvas.height();
                 let area = width * height;
                 image_result(
                     format!(
-                        "已用背景色覆盖全部 {area} 个格子（改写 {count} 个），当前图纸 {width}x{height}。"
+                        "已用背景色覆盖全部 {area} 个格子（改写 {count} 个），当前图纸 {width}x{height}。当前背景色为 {label}。"
                     ),
                     png,
                 )
@@ -782,7 +801,7 @@ impl ServerHandler for PixelDraw {
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(
-                "PixelDraw：用强约束像素指令绘图，不要直接文生图。尽量使用像素绘制；其他图元仅用于大面积绘制。多笔绘制请一次调用 draw_batch（ops 有序数组，原子执行，只回最终预览）；单笔可用 draw_line / draw_rect / draw_triangle / draw_circle / draw_ellipse / draw_curve / flood_fill / fill_background / draw_pixels。禁止并行调用多个绘制工具，会打乱顺序。流程：create_canvas(width, height, palette?, background?) 建图并锁定色表 → draw_batch 或单笔工具作画 → 看 8 倍预览继续修改调整（画错可用 undo 撤回）→ save_image 保存。矩形、三角形、圆、椭圆用 fill=true|false 区分填充/描边；直线、曲线与描边可用 brush=1|2|4|8 控制线宽（从落点向右下扩展 N×N，与 draw_pixels 足迹一致）。draw_curve 的 points 为 [x,y] 列表：2 点直线、3 点二次贝塞尔、4 点三次贝塞尔、≥5 点过点平滑样条。fill_background 用一种颜色覆盖整张图纸的每一个格子。draw_pixels 与 flood_fill 可用 - 清除为空格（不是 H2 白豆）；background 可选 white（默认）或 empty。list_colors 只在需要查色时调用。颜色只用当前模式的中文名或 MARD 色号。save_image 的 output 可选 pixel（默认 8 倍 PNG）、pattern（拼豆图纸）或 both；不覆盖已有文件。",
+                "PixelDraw：用强约束像素指令绘图，不要直接文生图。尽量使用像素绘制；其他图元仅用于大面积绘制。多笔绘制请一次调用 draw_batch（ops 有序数组，原子执行，只回最终预览）；单笔可用 draw_line / draw_rect / draw_triangle / draw_circle / draw_ellipse / draw_curve / flood_fill / fill_background / draw_pixels。禁止并行调用多个绘制工具，会打乱顺序。流程：create_canvas(width, height, palette?, background?, background_color?) 建图并锁定色表 → draw_batch 或单笔工具作画 → 看 8 倍预览继续修改调整（画错可用 undo 撤回）→ save_image 保存。矩形、三角形、圆、椭圆用 fill=true|false 区分填充/描边；直线、曲线与描边可用 brush=1|2|4|8 控制线宽（从落点向右下扩展 N×N，与 draw_pixels 足迹一致）。draw_curve 的 points 为 [x,y] 列表：2 点直线、3 点二次贝塞尔、4 点三次贝塞尔、≥5 点过点平滑样条。fill_background 用一种颜色覆盖整张图纸的每一个格子，并把当前背景色改为该颜色。draw_pixels 与 flood_fill 可用 - 清除为空格（不是 H2 白豆）；background 可选 white（默认）或 empty；background_color 可选，用色表颜色铺满并记为当前背景色。list_colors 只在需要查色时调用。颜色只用当前模式的中文名或 MARD 色号。save_image 的 output 可选 pixel（默认 8 倍 PNG）、pattern（拼豆图纸）或 both；不覆盖已有文件。",
             )
     }
 }
@@ -1106,6 +1125,11 @@ mod tests {
         assert!(serde_json::from_str::<SaveImageRequest>(r#"{"output":"unknown"}"#).is_err());
         let req: CreateCanvasRequest = serde_json::from_str(r#"{"width":1,"height":1}"#).unwrap();
         assert!(matches!(req.background, Background::White));
+        assert!(req.background_color.is_none());
+        let req: CreateCanvasRequest =
+            serde_json::from_str(r#"{"width":1,"height":1,"background_color":"正红"}"#).unwrap();
+        assert!(matches!(req.background, Background::White));
+        assert_eq!(req.background_color.as_deref(), Some("正红"));
         assert!(
             serde_json::from_str::<CreateCanvasRequest>(
                 r#"{"width":1,"height":1,"background":"unknown"}"#
@@ -1281,6 +1305,7 @@ mod tests {
         server
             .create_canvas(Parameters(CreateCanvasRequest {
                 background: Background::White,
+                background_color: None,
                 width: 4,
                 height: 4,
                 palette: Some("24".into()),
@@ -1650,6 +1675,7 @@ mod tests {
             let result = server
                 .create_canvas(Parameters(CreateCanvasRequest {
                     background: Background::White,
+                    background_color: None,
                     width,
                     height,
                     palette: Some(palette.into()),
@@ -1837,6 +1863,17 @@ mod tests {
                 .all(|code| *code == Some("F5"))
         );
         assert_eq!(
+            server
+                .canvas
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .background_code(),
+            Some("F5")
+        );
+        assert!(text.contains("当前背景色为 中国红（F5）"));
+        assert_eq!(
             server.canvas.lock().await.as_ref().unwrap().undo_len(),
             undo_before + 1
         );
@@ -1865,6 +1902,16 @@ mod tests {
         assert_eq!(
             server.canvas.lock().await.as_ref().unwrap().codes(),
             before_codes
+        );
+        assert_eq!(
+            server
+                .canvas
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .background_code(),
+            Some("H2")
         );
 
         let backup = server.canvas.lock().await.clone();
@@ -1895,6 +1942,16 @@ mod tests {
             server.canvas.lock().await.as_ref().unwrap().undo_len(),
             backup.as_ref().unwrap().undo_len()
         );
+        assert_eq!(
+            server
+                .canvas
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .background_code(),
+            backup.as_ref().unwrap().background_code()
+        );
 
         server
             .draw_batch(Parameters(DrawBatchRequest {
@@ -1911,6 +1968,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(server.canvas.lock().await.as_ref().unwrap().undo_len(), 2);
+        assert_eq!(
+            server
+                .canvas
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .background_code(),
+            Some("A4")
+        );
         assert_eq!(
             server.canvas.lock().await.as_ref().unwrap().codes()[0],
             Some("H7")
@@ -1933,10 +2000,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response_png(&reverted), painted_png);
+        assert_eq!(
+            server
+                .canvas
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .background_code(),
+            Some("H2")
+        );
 
         server
             .create_canvas(Parameters(CreateCanvasRequest {
                 background: Background::Empty,
+                background_color: None,
                 width: 2,
                 height: 2,
                 palette: Some("24".into()),
@@ -1944,6 +2022,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(server.canvas.lock().await.as_ref().unwrap().undo_len(), 0);
+        assert_eq!(
+            server
+                .canvas
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .background_code(),
+            None
+        );
         let empty_filled = server
             .fill_background(Parameters(FillBackgroundRequest {
                 color: "纯黑".into(),
@@ -1961,6 +2049,23 @@ mod tests {
         let empty_img = image::load_from_memory(&empty_png).unwrap().to_rgba8();
         assert_eq!(empty_img.dimensions(), (16, 16));
         assert!(empty_img.pixels().all(|pixel| pixel.0 == [0, 0, 0, 255]));
+        assert!(
+            empty_filled.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("当前背景色为 纯黑（H7）")
+        );
+        assert_eq!(
+            server
+                .canvas
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .background_code(),
+            Some("H7")
+        );
         let restored = server
             .undo(Parameters(UndoRequest { steps: None }))
             .await
@@ -1969,5 +2074,249 @@ mod tests {
             .unwrap()
             .to_rgba8();
         assert!(restored_img.pixels().all(|pixel| pixel.0[3] == 0));
+        assert_eq!(
+            server
+                .canvas
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .background_code(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn create_canvas_background_color_is_optional_and_tracks_refill() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = PixelDraw::new(dir.path().to_path_buf());
+        let created = server
+            .create_canvas(Parameters(CreateCanvasRequest {
+                width: 2,
+                height: 2,
+                palette: Some("24".into()),
+                background: Background::White,
+                background_color: Some("正红".into()),
+            }))
+            .await
+            .unwrap();
+        assert_ne!(created.is_error, Some(true));
+        assert!(
+            created.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("背景为 正红（F2）")
+        );
+        let img = image::load_from_memory(&response_png(&created))
+            .unwrap()
+            .to_rgb8();
+        assert!(img.pixels().all(|pixel| pixel.0 == [0xFC, 0x3D, 0x46]));
+        assert_eq!(
+            server
+                .canvas
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .background_code(),
+            Some("F2")
+        );
+        assert_eq!(server.canvas.lock().await.as_ref().unwrap().undo_len(), 0);
+
+        let white = server
+            .create_canvas(Parameters(CreateCanvasRequest {
+                width: 2,
+                height: 2,
+                palette: Some("24".into()),
+                background: Background::White,
+                background_color: None,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            white.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("背景为 雪白（H2）")
+        );
+        assert_eq!(
+            server
+                .canvas
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .background_code(),
+            Some("H2")
+        );
+
+        let rejected = server
+            .create_canvas(Parameters(CreateCanvasRequest {
+                width: 2,
+                height: 2,
+                palette: Some("24".into()),
+                background: Background::White,
+                background_color: Some("淡鹅黄".into()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(rejected.is_error, Some(true));
+        assert!(
+            rejected.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("未知颜色")
+        );
+        assert_eq!(
+            server
+                .canvas
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .background_code(),
+            Some("H2")
+        );
+
+        let conflict = server
+            .create_canvas(Parameters(CreateCanvasRequest {
+                width: 2,
+                height: 2,
+                palette: Some("24".into()),
+                background: Background::Empty,
+                background_color: Some("正红".into()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(conflict.is_error, Some(true));
+        assert!(
+            conflict.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("background_color")
+        );
+        assert_eq!(
+            server
+                .canvas
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .background_code(),
+            Some("H2")
+        );
+
+        let blank = server
+            .create_canvas(Parameters(CreateCanvasRequest {
+                width: 2,
+                height: 2,
+                palette: Some("24".into()),
+                background: Background::Empty,
+                background_color: Some("   ".into()),
+            }))
+            .await
+            .unwrap();
+        assert_ne!(blank.is_error, Some(true));
+        assert!(
+            blank.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("背景为 空格")
+        );
+        assert_eq!(
+            server
+                .canvas
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .background_code(),
+            None
+        );
+
+        server
+            .create_canvas(Parameters(CreateCanvasRequest {
+                width: 2,
+                height: 2,
+                palette: Some("144".into()),
+                background: Background::White,
+                background_color: Some("f2".into()),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(
+            server
+                .canvas
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .background_code(),
+            Some("F2")
+        );
+        server
+            .draw_pixels(Parameters(DrawPixelsRequest {
+                pixels: "0 0 纯黑".into(),
+                brush: Some(1),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(
+            server
+                .canvas
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .background_code(),
+            Some("F2")
+        );
+
+        let filled = server
+            .fill_background(Parameters(FillBackgroundRequest {
+                color: "中国红".into(),
+            }))
+            .await
+            .unwrap();
+        assert!(
+            filled.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("当前背景色为 中国红（F5）")
+        );
+        assert_eq!(
+            server
+                .canvas
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .background_code(),
+            Some("F5")
+        );
+        server
+            .undo(Parameters(UndoRequest { steps: None }))
+            .await
+            .unwrap();
+        assert_eq!(
+            server
+                .canvas
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .background_code(),
+            Some("F2")
+        );
+        assert_eq!(
+            server.canvas.lock().await.as_ref().unwrap().codes()[0],
+            Some("H7")
+        );
     }
 }

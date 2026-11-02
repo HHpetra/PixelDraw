@@ -8,7 +8,7 @@
 
 不要直接文生图。必须通过 MCP 工具绘制。**尽量使用像素绘制（draw_pixels）；其他工具仅用于大面积绘制。多笔请用 draw_batch 一次提交（原子、顺序执行、只回最终预览）；不要并行调用多个绘制工具。**
 
-1. 调用 `create_canvas(width, height, palette?, background?)` 创建图纸；`background` 默认 `white`（H2 白豆），可选 `empty`（不放豆）。宽和高为像素数，范围 `1..=128`。`palette` 为 `"24"`、`"144"` 或 `"221"`，**默认 `"221"`**。色表在创建时锁定，绘制中途不可更改。再次调用会覆盖当前图纸。
+1. 调用 `create_canvas(width, height, palette?, background?, background_color?)` 创建图纸；`background` 默认 `white`（H2 白豆），可选 `empty`（不放豆）。可选 `background_color` 为当前色表的中文名或 MARD 色号：整张铺该色豆，并记为当前背景色；省略时与只传 `background` 相同。`background: empty` 不能与 `background_color` 同时使用。宽和高为像素数，范围 `1..=128`。`palette` 为 `"24"`、`"144"` 或 `"221"`，**默认 `"221"`**。色表在创建时锁定，绘制中途不可更改。再次调用会覆盖当前图纸。颜色非法时不创建、不覆盖已有图纸。
 2. 画出图形（图元或描点均可）：
    - `draw_line({ x0, y0, x1, y1, color, brush? })` 直线
    - `draw_rect({ x0, y0, x1, y1, color, fill, brush? })` 矩形；`fill: true` 填充，`false` 描边
@@ -17,7 +17,7 @@
    - `draw_ellipse({ cx, cy, rx, ry, color, fill, brush? })` 椭圆；`fill` 同上
    - `draw_curve({ points: [[x,y], ...], color, brush? })` 曲线；2 点直线、3 点二次贝塞尔、4 点三次贝塞尔、≥5 点过点平滑样条（Catmull-Rom）
    - `flood_fill({ x, y, color })` 油漆桶，四连通替换种子点同色号区域；空格与 H2 白豆分开处理；`color` 可用 `-` 清为空格
-   - `fill_background({ color })` 用当前色表的中文名或 MARD 色号强行覆盖整张图纸的每一个格子（已有画面、空格和其他颜色都会被替换）。与 `flood_fill` 不同，不停在色块边界，也不接受 `-`。颜色非法时画布不变；整张已是该颜色时不改动、不记 undo
+   - `fill_background({ color })` 用当前色表的中文名或 MARD 色号强行覆盖整张图纸的每一个格子（已有画面、空格和其他颜色都会被替换），并把已记录的当前背景色改为该颜色。与 `flood_fill` 不同，不停在色块边界，也不接受 `-`。颜色非法时画布与背景色都不变。有格子变化，或当前背景色与新颜色不同时，记一次 undo；格子和背景色都已是该颜色时不改动、不记 undo。`undo` 会一并恢复之前的背景色
    - `draw_pixels({ pixels: "0 0 正红 0 1 纯黑", brush? })` 散点/方块笔刷落点；用 `-` 清除为空格（不是 H2 白豆）
    - `draw_batch({ ops })` 多笔有序批量；`ops` 项用 `type` 区分 line/rect/triangle/circle/ellipse/curve/flood_fill/fill_background/pixels
 3. `list_colors` 只在需要查色时调用，**不是**作画必经步骤。
