@@ -7,9 +7,9 @@ use crate::shapes;
 
 pub const MAX_SIZE: u32 = 128;
 pub const SCALE: u32 = 8;
-/// Radii larger than this cannot cover the canvas after clipping, so they are
-/// capped before rasterization (avoids unbounded point buffers and i64 overflow).
-pub const MAX_RADIUS: u32 = 256;
+/// Diameters and ellipse axes larger than this are capped before rasterization.
+/// Same order of magnitude as the old radius cap of 256 (`diameter = 2×radius + 1`).
+pub const MAX_AXIS: u32 = 512;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum BrushSize {
@@ -535,44 +535,59 @@ impl Canvas {
         self.paint_shape_points(&points, color, brush)
     }
 
+    /// Pixel circle anchored at the top-left `(x, y)` of a `diameter`×`diameter` box.
+    /// `diameter` must be >= 1; values above [`MAX_AXIS`] are clamped.
+    /// The anchor must lie on the canvas. Cells past the right or bottom edge are clipped.
     pub fn paint_circle(
         &mut self,
-        cx: u32,
-        cy: u32,
-        radius: u32,
+        x: u32,
+        y: u32,
+        diameter: u32,
         color: &str,
         fill: bool,
         brush: BrushSize,
     ) -> Result<usize, CanvasError> {
-        self.require_point(cx, cy)?;
-        let r = radius.min(MAX_RADIUS) as i32;
+        self.require_point(x, y)?;
+        if diameter == 0 {
+            return Err(CanvasError::InvalidOp {
+                message: "直径必须是大于等于 1 的整数。".into(),
+            });
+        }
+        let diameter = diameter.min(MAX_AXIS) as i32;
         let points = if fill {
-            shapes::circle_fill_points(cx as i32, cy as i32, r)
+            shapes::circle_fill_points(x as i32, y as i32, diameter)
         } else {
-            shapes::circle_stroke_points(cx as i32, cy as i32, r)
+            shapes::circle_stroke_points(x as i32, y as i32, diameter)
         };
         let brush = if fill { BrushSize::One } else { brush };
         self.paint_shape_points(&points, color, brush)
     }
 
+    /// Pixel ellipse anchored at the top-left `(x, y)` of a `width`×`height` box.
+    /// `width` and `height` must be >= 1; values above [`MAX_AXIS`] are clamped.
     #[allow(clippy::too_many_arguments)] // Coordinates mirror the drawing tool parameters.
     pub fn paint_ellipse(
         &mut self,
-        cx: u32,
-        cy: u32,
-        rx: u32,
-        ry: u32,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
         color: &str,
         fill: bool,
         brush: BrushSize,
     ) -> Result<usize, CanvasError> {
-        self.require_point(cx, cy)?;
-        let rx = rx.min(MAX_RADIUS) as i32;
-        let ry = ry.min(MAX_RADIUS) as i32;
+        self.require_point(x, y)?;
+        if width == 0 || height == 0 {
+            return Err(CanvasError::InvalidOp {
+                message: "椭圆的宽和高必须是大于等于 1 的整数。".into(),
+            });
+        }
+        let width = width.min(MAX_AXIS) as i32;
+        let height = height.min(MAX_AXIS) as i32;
         let points = if fill {
-            shapes::ellipse_fill_points(cx as i32, cy as i32, rx, ry)
+            shapes::ellipse_fill_points(x as i32, y as i32, width, height)
         } else {
-            shapes::ellipse_stroke_points(cx as i32, cy as i32, rx, ry)
+            shapes::ellipse_stroke_points(x as i32, y as i32, width, height)
         };
         let brush = if fill { BrushSize::One } else { brush };
         self.paint_shape_points(&points, color, brush)
@@ -1557,40 +1572,61 @@ mod tests {
     }
 
     #[test]
-    fn huge_radius_is_capped_without_hanging() {
-        let mut canvas = Canvas::new(8, 8, PaletteMode::Colors24).unwrap();
+    fn huge_diameter_is_capped_without_hanging() {
+        let mut canvas = Canvas::new(128, 128, PaletteMode::Colors24).unwrap();
         let before = canvas.undo_len();
         let written = canvas
-            .paint_circle(4, 4, u32::MAX, "纯黑", true, BrushSize::One)
+            .paint_circle(0, 0, u32::MAX, "纯黑", true, BrushSize::One)
             .unwrap();
         assert!(written > 0);
-        assert_eq!(canvas.pixels[4 * 8 + 4], [0, 0, 0]);
         assert_eq!(canvas.undo_len(), before + 1);
-
-        let mut stroke = Canvas::new(8, 8, PaletteMode::Colors24).unwrap();
-        let w = stroke
-            .paint_ellipse(
-                4,
-                4,
-                3_000_000_000,
-                3_000_000_000,
-                "纯黑",
-                true,
-                BrushSize::One,
-            )
+        let mut capped = Canvas::new(128, 128, PaletteMode::Colors24).unwrap();
+        capped
+            .paint_circle(0, 0, MAX_AXIS, "纯黑", true, BrushSize::One)
             .unwrap();
-        assert!(w > 0);
-        assert_eq!(stroke.pixels[4 * 8 + 4], [0, 0, 0]);
+        assert_eq!(canvas.pixels, capped.pixels);
+        let mut also = Canvas::new(128, 128, PaletteMode::Colors24).unwrap();
+        also.paint_circle(0, 0, MAX_AXIS + 1, "纯黑", true, BrushSize::One)
+            .unwrap();
+        assert_eq!(canvas.pixels, also.pixels);
+        let mut smaller = Canvas::new(128, 128, PaletteMode::Colors24).unwrap();
+        smaller
+            .paint_circle(0, 0, MAX_AXIS - 1, "纯黑", true, BrushSize::One)
+            .unwrap();
+        assert_ne!(canvas.pixels, smaller.pixels);
+
+        let mut ellipse = Canvas::new(128, 128, PaletteMode::Colors24).unwrap();
+        ellipse
+            .paint_ellipse(0, 0, 3_000_000_000, 4, "纯黑", true, BrushSize::One)
+            .unwrap();
+        let mut ellipse_cap = Canvas::new(128, 128, PaletteMode::Colors24).unwrap();
+        ellipse_cap
+            .paint_ellipse(0, 0, MAX_AXIS, 4, "纯黑", true, BrushSize::One)
+            .unwrap();
+        assert_eq!(ellipse.pixels, ellipse_cap.pixels);
+        assert!(ellipse.pixels.contains(&[0, 0, 0]));
     }
 
     #[test]
-    fn fully_clipped_stroke_records_no_undo() {
-        let mut canvas = Canvas::new(4, 4, PaletteMode::Colors24).unwrap();
+    fn fully_clipped_circle_records_no_undo() {
+        // A diameter-512 disk anchored at the origin does not reach an 8×8 corner.
+        let mut canvas = Canvas::new(8, 8, PaletteMode::Colors24).unwrap();
         let before = canvas.undo_len();
         let written = canvas
-            .paint_circle(1, 1, 50, "纯黑", false, BrushSize::One)
+            .paint_circle(0, 0, 512, "纯黑", false, BrushSize::One)
             .unwrap();
         assert_eq!(written, 0);
+        assert_eq!(canvas.undo_len(), before);
+        assert!(
+            canvas
+                .pixels
+                .iter()
+                .all(|pixel| *pixel == PaletteMode::Colors24.white_rgb())
+        );
+        let filled = canvas
+            .paint_circle(0, 0, MAX_AXIS, "纯黑", true, BrushSize::One)
+            .unwrap();
+        assert_eq!(filled, 0);
         assert_eq!(canvas.undo_len(), before);
     }
 
@@ -1852,22 +1888,27 @@ mod tests {
     fn circle_and_ellipse_fill_and_flood() {
         let mut canvas = Canvas::new(9, 9, PaletteMode::Colors24).unwrap();
         canvas
-            .paint_circle(4, 4, 2, "深蓝", true, BrushSize::One)
+            .paint_circle(2, 2, 5, "深蓝", true, BrushSize::One)
             .unwrap();
         let blue = [0x0F, 0x54, 0xC0];
         let yellow = [0xFB, 0xED, 0x56];
+        let white = PaletteMode::Colors24.white_rgb();
+        // Center cell of the diameter-5 disk. The box corner is outside it.
         assert_eq!(canvas.pixels[4 * 9 + 4], blue);
+        assert_eq!(canvas.pixels[2 * 9 + 2], white);
         canvas.flood_fill(0, 0, "明黄").unwrap();
         assert_eq!(canvas.pixels[0], yellow);
         assert_eq!(canvas.pixels[4 * 9 + 4], blue);
 
         let mut ellipse = Canvas::new(9, 9, PaletteMode::Colors24).unwrap();
         ellipse
-            .paint_ellipse(4, 4, 3, 1, "纯黑", true, BrushSize::One)
+            .paint_ellipse(1, 3, 7, 3, "纯黑", true, BrushSize::One)
             .unwrap();
-        assert_eq!(ellipse.pixels[4 * 9 + 4], [0, 0, 0]);
+        // Equator of a 7×3 ellipse is the middle row and spans the full width.
         assert_eq!(ellipse.pixels[4 * 9 + 1], [0, 0, 0]);
-        assert_eq!(ellipse.pixels[4], PaletteMode::Colors24.white_rgb());
+        assert_eq!(ellipse.pixels[4 * 9 + 7], [0, 0, 0]);
+        assert_eq!(ellipse.pixels[4 * 9 + 4], [0, 0, 0]);
+        assert_eq!(ellipse.pixels[2 * 9 + 4], white);
     }
 
     #[test]
@@ -2083,28 +2124,36 @@ mod tests {
 
         let mut circle = Canvas::new(16, 16, PaletteMode::Colors24).unwrap();
         circle
-            .paint_circle(8, 8, 5, "纯黑", false, BrushSize::One)
+            .paint_circle(2, 2, 11, "纯黑", false, BrushSize::One)
             .unwrap();
         let circle_cells = cells_with(&circle, black());
+        let circle_fill: HashSet<(u32, u32)> = shapes::circle_fill_points(2, 2, 11)
+            .into_iter()
+            .map(|(x, y)| (x as u32, y as u32))
+            .collect();
+        assert!(circle_fill.contains(&(7, 7)));
         assert!(
-            !circle_cells.contains(&(8, 8)),
+            !circle_cells.contains(&(7, 7)),
             "circle stroke filled center"
         );
-        assert!(
-            !circle_cells.contains(&(8, 9)),
-            "circle stroke filled interior"
-        );
+        assert!(circle_cells.is_subset(&circle_fill));
         assert!(is_8_connected_region(&circle_cells), "circle ring has gaps");
 
         let mut ellipse = Canvas::new(16, 16, PaletteMode::Colors24).unwrap();
         ellipse
-            .paint_ellipse(8, 8, 6, 3, "纯黑", false, BrushSize::One)
+            .paint_ellipse(2, 4, 12, 8, "纯黑", false, BrushSize::One)
             .unwrap();
         let ellipse_cells = cells_with(&ellipse, black());
+        let ellipse_fill: HashSet<(u32, u32)> = shapes::ellipse_fill_points(2, 4, 12, 8)
+            .into_iter()
+            .map(|(x, y)| (x as u32, y as u32))
+            .collect();
+        assert!(ellipse_fill.contains(&(8, 8)));
         assert!(
             !ellipse_cells.contains(&(8, 8)),
             "ellipse stroke filled center"
         );
+        assert!(ellipse_cells.is_subset(&ellipse_fill));
         assert!(is_8_connected_region(&ellipse_cells));
 
         let mut triangle = Canvas::new(16, 16, PaletteMode::Colors24).unwrap();
@@ -2135,15 +2184,131 @@ mod tests {
 
         let mut circle = Canvas::new(16, 16, PaletteMode::Colors24).unwrap();
         circle
-            .paint_circle(8, 8, 4, "纯黑", true, BrushSize::One)
+            .paint_circle(3, 3, 9, "纯黑", true, BrushSize::One)
             .unwrap();
         let disk = cells_with(&circle, black());
-        assert!(disk.contains(&(8, 8)));
-        assert!(disk.len() > 20);
+        let expected: HashSet<(u32, u32)> = shapes::circle_fill_points(3, 3, 9)
+            .into_iter()
+            .map(|(x, y)| (x as u32, y as u32))
+            .collect();
+        assert_eq!(disk, expected);
+        assert!(disk.contains(&(7, 7)));
         assert!(
             disk.iter()
-                .all(|&(x, y)| x.abs_diff(8) <= 4 && y.abs_diff(8) <= 4)
+                .all(|&(x, y)| (3..12).contains(&x) && (3..12).contains(&y))
         );
+    }
+
+    #[test]
+    fn circle_anchor_out_of_bounds_errors_and_overflow_clips() {
+        let mut canvas = Canvas::new(8, 8, PaletteMode::Colors24).unwrap();
+        let err = canvas
+            .paint_circle(8, 0, 4, "纯黑", true, BrushSize::One)
+            .unwrap_err();
+        assert!(matches!(err, CanvasError::OutOfBounds { x: 8, y: 0, .. }));
+        let err = canvas
+            .paint_ellipse(0, 8, 4, 4, "纯黑", true, BrushSize::One)
+            .unwrap_err();
+        assert!(matches!(err, CanvasError::OutOfBounds { x: 0, y: 8, .. }));
+        assert_eq!(canvas.undo_len(), 0);
+        assert!(
+            canvas
+                .pixels
+                .iter()
+                .all(|pixel| *pixel == PaletteMode::Colors24.white_rgb())
+        );
+
+        let zero = canvas
+            .paint_circle(0, 0, 0, "纯黑", true, BrushSize::One)
+            .unwrap_err();
+        assert!(zero.to_string().contains("直径"));
+        let zero_ellipse = canvas
+            .paint_ellipse(0, 0, 4, 0, "纯黑", true, BrushSize::One)
+            .unwrap_err();
+        assert!(zero_ellipse.to_string().contains("宽和高"));
+        assert_eq!(canvas.undo_len(), 0);
+
+        let written = canvas
+            .paint_circle(6, 5, 5, "纯黑", true, BrushSize::One)
+            .unwrap();
+        let cells = cells_with(&canvas, black());
+        let expected: HashSet<(u32, u32)> = shapes::circle_fill_points(6, 5, 5)
+            .into_iter()
+            .filter(|&(x, y)| (0..8).contains(&x) && (0..8).contains(&y))
+            .map(|(x, y)| (x as u32, y as u32))
+            .collect();
+        assert_eq!(cells, expected);
+        assert_eq!(written, expected.len());
+        assert!(written > 0);
+        assert!(
+            shapes::circle_fill_points(6, 5, 5)
+                .iter()
+                .any(|&(x, y)| x >= 8 || y >= 8),
+            "fixture should actually overflow"
+        );
+    }
+
+    #[test]
+    fn circle_and_ellipse_each_record_one_undo_step() {
+        let mut canvas = Canvas::new(16, 16, PaletteMode::Colors24).unwrap();
+        canvas
+            .paint_circle(1, 1, 9, "纯黑", true, BrushSize::One)
+            .unwrap();
+        assert_eq!(canvas.undo_len(), 1);
+        let after_circle = canvas.pixels.clone();
+        canvas
+            .paint_ellipse(0, 8, 6, 4, "正红", false, BrushSize::One)
+            .unwrap();
+        assert_eq!(canvas.undo_len(), 2);
+        canvas.undo(1).unwrap();
+        assert_eq!(canvas.pixels, after_circle);
+        assert_eq!(canvas.undo_len(), 1);
+        canvas.undo(1).unwrap();
+        assert!(
+            canvas
+                .pixels
+                .iter()
+                .all(|pixel| *pixel == PaletteMode::Colors24.white_rgb())
+        );
+    }
+
+    #[test]
+    fn circle_fill_ignores_brush_and_stroke_brush_stays_hollow() {
+        let mut thin_fill = Canvas::new(32, 32, PaletteMode::Colors24).unwrap();
+        thin_fill
+            .paint_circle(0, 0, 16, "纯黑", true, BrushSize::One)
+            .unwrap();
+        let mut thick_fill = Canvas::new(32, 32, PaletteMode::Colors24).unwrap();
+        thick_fill
+            .paint_circle(0, 0, 16, "纯黑", true, BrushSize::Eight)
+            .unwrap();
+        assert_eq!(thin_fill.pixels, thick_fill.pixels);
+
+        let mut thin = Canvas::new(32, 32, PaletteMode::Colors24).unwrap();
+        thin.paint_circle(0, 0, 16, "纯黑", false, BrushSize::One)
+            .unwrap();
+        let mut thick = Canvas::new(32, 32, PaletteMode::Colors24).unwrap();
+        thick
+            .paint_circle(0, 0, 16, "纯黑", false, BrushSize::Two)
+            .unwrap();
+        let thin_cells = cells_with(&thin, black());
+        let thick_cells = cells_with(&thick, black());
+        assert!(thin_cells.is_subset(&thick_cells));
+        assert!(thick_cells.len() > thin_cells.len());
+        // The four cells around the center of an even diameter stay empty.
+        for cell in [(7, 7), (8, 7), (7, 8), (8, 8)] {
+            assert!(!thick_cells.contains(&cell), "brush 2 filled {cell:?}");
+        }
+        assert!(is_8_connected_region(&thick_cells));
+
+        let mut ellipse = Canvas::new(32, 32, PaletteMode::Colors24).unwrap();
+        ellipse
+            .paint_ellipse(1, 1, 16, 16, "纯黑", false, BrushSize::Two)
+            .unwrap();
+        let cells = cells_with(&ellipse, black());
+        for cell in [(8, 8), (9, 8), (8, 9), (9, 9)] {
+            assert!(!cells.contains(&cell), "ellipse brush filled {cell:?}");
+        }
     }
 
     #[test]

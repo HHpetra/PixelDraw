@@ -156,7 +156,7 @@ preview and keep adjusting as needed. Minimal tool sequence (arguments shown as 
 
 ```text
 create_canvas {"width":16,"height":16,"palette":"24"}
-draw_circle   {"cx":8,"cy":8,"radius":5,"color":"C4","fill":true}
+draw_circle   {"x":2,"y":2,"diameter":12,"color":"C4","fill":true}
 draw_rect     {"x0":2,"y0":2,"x1":13,"y1":13,"color":"A4","fill":false,"brush":2}
 save_image    {"filename":"first-icon.png"}
 ```
@@ -199,8 +199,8 @@ Each file is saved atomically. `both` checks both names before writing, so exist
 | `draw_line` | Line; `brush` is stroke width 1/2/4/8, coordinates need not align to a grid. |
 | `draw_rect` | Rectangle; `fill` selects filled vs stroked, stroke uses `brush` width. |
 | `draw_triangle` | Triangle; `fill` selects filled vs stroked, stroke uses `brush` width. |
-| `draw_circle` | Circle; `fill` selects filled vs stroked, stroke uses `brush` width. |
-| `draw_ellipse` | Ellipse; `fill` selects filled vs stroked, stroke uses `brush` width. |
+| `draw_circle` | Circle anchored at top-left `(x, y)` with integer `diameter` ≥ 1 (values above 512 clamp to 512). Occupies `diameter × diameter` cells; a cell is painted when its center lies inside. Anchor must be on the canvas; right and bottom overflow is clipped. `fill` selects the disk or its 1-cell outline. Stroke uses `brush`; fill ignores it. |
+| `draw_ellipse` | Ellipse anchored at top-left `(x, y)` with integer `width` and `height` ≥ 1 (values above 512 clamp to 512). Same center-in-ellipse rule. `width == height` matches `draw_circle` of that diameter. Anchor, clipping, `fill`, and `brush` match the circle. |
 | `draw_curve` | Curve through `[x,y]` points: 2=line, 3=quadratic Bezier, 4=cubic Bezier, 5+=Catmull-Rom through every point. |
 | `flood_fill` | Four-connected fill of the seed's current bead code; empty cells are distinct from H2 white beads. Use `-` to clear a region back to empty. |
 | `fill_background` | Overwrites every cell with one palette color (MARD code or Chinese name), including empty cells and existing artwork, and sets the remembered background color to that color. Invalid colors leave the canvas and its background color unchanged. One undo step when any cell changes or the remembered color differs; no step when both already match. Undo restores the previous background color. Also a `draw_batch` op. |
@@ -221,9 +221,12 @@ Each file is saved atomically. `both` checks both names before writing, so exist
   are applied in order. Colors use MARD codes or the active palette's Chinese names.
 - `fill_background` replaces every cell and updates the remembered background color. It does not stop at a connected region
   the way `flood_fill` does, and it does not accept `-`. Undo restores the previous background color with the cells.
-- Circle/ellipse radii may extend past the canvas and are clipped (values above
-  256 are treated as 256). Line ends,
-  curve points, circle centers, and flood-fill seeds must stay inside the canvas.
+- Circle and ellipse anchors `(x, y)` must stay inside the canvas. `diameter`,
+  `width`, and `height` are integers ≥ 1; values above 512 are treated as 512.
+  Cells past the right or bottom edge are clipped. A cell is included when its
+  center lies inside the ellipse. `fill: false` paints the 1-cell outline of
+  that fill. Old names `cx`, `cy`, `radius`, `rx`, and `ry` are rejected.
+  Line ends, curve points, and flood-fill seeds must stay inside the canvas.
   A region move or copy is rejected entirely when a source endpoint or the
   destination rectangle falls outside the canvas; the canvas and undo history
   stay unchanged.

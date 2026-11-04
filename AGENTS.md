@@ -13,8 +13,8 @@
    - `draw_line({ x0, y0, x1, y1, color, brush? })` 直线
    - `draw_rect({ x0, y0, x1, y1, color, fill, brush? })` 矩形；`fill: true` 填充，`false` 描边
    - `draw_triangle({ x0, y0, x1, y1, x2, y2, color, fill, brush? })` 三角形；`fill` 同上
-   - `draw_circle({ cx, cy, radius, color, fill, brush? })` 圆；`fill` 同上
-   - `draw_ellipse({ cx, cy, rx, ry, color, fill, brush? })` 椭圆；`fill` 同上
+   - `draw_circle({ x, y, diameter, color, fill, brush? })` 圆；`fill` 同上。左上角锚定，占据 `diameter×diameter` 格；格心落在圆内才计入
+   - `draw_ellipse({ x, y, width, height, color, fill, brush? })` 椭圆；`fill` 同上。占据 `width×height` 格；宽高相等时与同直径的圆逐格相同
    - `draw_curve({ points: [[x,y], ...], color, brush? })` 曲线；2 点直线、3 点二次贝塞尔、4 点三次贝塞尔、≥5 点过点平滑样条（Catmull-Rom）
    - `flood_fill({ x, y, color })` 油漆桶，四连通替换种子点同色号区域；空格与 H2 白豆分开处理；`color` 可用 `-` 清为空格
    - `fill_background({ color })` 用当前色表的中文名或 MARD 色号强行覆盖整张图纸的每一个格子（已有画面、空格和其他颜色都会被替换），并把已记录的当前背景色改为该颜色。与 `flood_fill` 不同，不停在色块边界，也不接受 `-`。颜色非法时画布与背景色都不变。有格子变化，或当前背景色与新颜色不同时，记一次 undo；格子和背景色都已是该颜色时不改动、不记 undo。`undo` 会一并恢复之前的背景色
@@ -36,7 +36,7 @@
 - 对 `draw_pixels`：`x`、`y` 必须是 `N` 的倍数（不吸附）。例如 `brush: 2` 只能落在 `0,2,4,6…`。
 - 填充模式与 `flood_fill` 忽略 `brush`。
 
-颜色非法时整批拒绝。图元端点/圆心/曲线路径点/种子点越界报错；圆/椭圆半径可超出图纸，超出部分自动裁剪（半径/轴长超过 256 时按 256 计算）。`draw_pixels` 笔刷未对齐或方块出界时整批拒绝。区域搬运的源端点越界，或目标区域越界，整次拒绝、画布不变、不记 undo。
+颜色非法时整批拒绝。图元端点、曲线路径点、种子点越界报错。圆和椭圆的锚点 `(x, y)` 必须在图纸内；`diameter`、`width`、`height` 为 ≥ 1 的整数，超过 512 时按 512 计算；右侧和下方超出部分自动裁剪。旧参数 `cx`、`cy`、`radius`、`rx`、`ry` 会报错，不静默忽略。`draw_pixels` 笔刷未对齐或方块出界时整批拒绝。区域搬运的源端点越界，或目标区域越界，整次拒绝、画布不变、不记 undo。
 
 ## 24 色表
 

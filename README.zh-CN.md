@@ -125,7 +125,7 @@ OpenCode 配置示例：
 
 ```text
 create_canvas {"width":16,"height":16,"palette":"24"}
-draw_circle   {"cx":8,"cy":8,"radius":5,"color":"C4","fill":true}
+draw_circle   {"x":2,"y":2,"diameter":12,"color":"C4","fill":true}
 draw_rect     {"x0":2,"y0":2,"x1":13,"y1":13,"color":"A4","fill":false,"brush":2}
 save_image    {"filename":"first-icon.png"}
 ```
@@ -168,8 +168,8 @@ save_image    {"filename":"cat.png","output":"both"}
 | `draw_line` | 画直线；`brush` 为线宽 1/2/4/8，坐标不必对齐网格。 |
 | `draw_rect` | 矩形；`fill` 区分填充/描边，描边可用 `brush` 加粗。 |
 | `draw_triangle` | 三角形；`fill` 区分填充/描边，描边可用 `brush` 加粗。 |
-| `draw_circle` | 圆；`fill` 区分填充/描边，描边可用 `brush` 加粗。 |
-| `draw_ellipse` | 椭圆；`fill` 区分填充/描边，描边可用 `brush` 加粗。 |
+| `draw_circle` | 圆。左上角 `(x, y)` 与直径 `diameter`（≥ 1 的整数，超过 512 按 512），占据 `diameter×diameter` 格；格心落在圆内才计入。锚点必须在画布内，右侧和下方超出裁剪。`fill` 区分填充与 1 格轮廓；描边可用 `brush` 加粗，填充忽略笔刷。 |
+| `draw_ellipse` | 椭圆。左上角 `(x, y)` 与宽 `width`、高 `height`（规则与圆相同）。宽高相等时与同直径的圆逐格相同。 |
 | `draw_curve` | 曲线：`points` 为 `[x,y]` 列表；2 点直线、3 点二次贝塞尔、4 点三次贝塞尔、≥5 点过点平滑样条。 |
 | `flood_fill` | 油漆桶，四连通替换种子点同色号区域；空格与 H2 白豆分开处理；`color` 可用 `-` 清为空格。 |
 | `fill_background` | 用一种颜色（中文名或 MARD 色号）强行覆盖每一个格子，包括空格和已有画面，并把已记录的背景色改为该颜色。颜色非法时画布和背景色都不变。有格子变化，或背景色不同时，记一次 undo；格子和背景色都已是该颜色时不改动、不记步。undo 会恢复之前的背景色。也可作为 `draw_batch` 的一步。 |
@@ -186,7 +186,7 @@ save_image    {"filename":"cat.png","output":"both"}
 - `draw_pixels` 的笔刷坐标必须是笔刷尺寸的倍数，整个方块都必须在画布内。
 - 重复落点按输入顺序覆盖；非法批次不会修改画布。
 - `fill_background` 覆盖每一个格子，并把当前背景色改为新颜色；不会像 `flood_fill` 那样停在同色区域边界，也不接受 `-` 清为空格。`undo` 会一并恢复之前的背景色。
-- 圆/椭圆半径可超出画布，超出部分自动裁剪（半径/轴长超过 256 时按 256 计算）；端点、曲线路径点、圆心、种子点必须在画布内。区域搬运的源端点越界，或目标区域越界，整次拒绝，画布与 undo 都不变。
+- 圆和椭圆的锚点 `(x, y)` 必须在画布内。`diameter`、`width`、`height` 为 ≥ 1 的整数，超过 512 时按 512 计算；右侧和下方超出部分自动裁剪。格心落在椭圆内才计入。`fill: false` 画该填充的 1 格轮廓。旧参数 `cx`、`cy`、`radius`、`rx`、`ry` 会报错。端点、曲线路径点、种子点必须在画布内。区域搬运的源端点越界，或目标区域越界，整次拒绝，画布与 undo 都不变。
 - 每个服务实例只有一张内存画布；重启会丢失未保存内容。撤销历史仅存内存（最多 64 步），`create_canvas` 会清空。暂不支持导入、会话持久化或原始尺寸导出。
 - 像素画预览通过最近邻采样放大 8 倍；拼豆图纸使用独立的网格布局。24、144、221 三套色表中，同一个 MARD 色号使用相同的中文名和 RGB。
 
