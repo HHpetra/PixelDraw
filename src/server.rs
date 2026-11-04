@@ -133,16 +133,17 @@ pub struct DrawTriangleRequest {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DrawCircleRequest {
-    /// 圆心 X，必须在图纸范围内；半径可以超出图纸，超出部分裁剪（超过 256 按 256）
-    pub cx: u32,
-    /// 圆心 Y
-    pub cy: u32,
-    /// 半径（像素），0 表示单点
-    pub radius: u32,
+    /// 占据方形的左上角 X，必须在图纸内；右侧超出部分裁剪
+    pub x: u32,
+    /// 占据方形的左上角 Y，必须在图纸内；下方超出部分裁剪
+    pub y: u32,
+    /// 直径（格子数），必须 ≥ 1；超过 512 按 512。圆占据 diameter×diameter 格
+    pub diameter: u32,
     /// 颜色
     pub color: String,
-    /// true 为填充，false 为描边
+    /// true 为填充，false 为该填充的 1 格轮廓
     pub fill: bool,
     /// 描边线宽笔刷 1/2/4/8，默认 1；填充时忽略
     #[serde(default)]
@@ -150,18 +151,19 @@ pub struct DrawCircleRequest {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DrawEllipseRequest {
-    /// 圆心 X
-    pub cx: u32,
-    /// 圆心 Y
-    pub cy: u32,
-    /// 水平半径，0 表示退化为竖线或单点
-    pub rx: u32,
-    /// 垂直半径
-    pub ry: u32,
+    /// 占据矩形的左上角 X，必须在图纸内；右侧超出部分裁剪
+    pub x: u32,
+    /// 占据矩形的左上角 Y，必须在图纸内；下方超出部分裁剪
+    pub y: u32,
+    /// 宽度（格子数），必须 ≥ 1；超过 512 按 512
+    pub width: u32,
+    /// 高度（格子数），必须 ≥ 1；超过 512 按 512。宽高相等时与同直径的圆逐格相同
+    pub height: u32,
     /// 颜色
     pub color: String,
-    /// true 为填充，false 为描边
+    /// true 为填充，false 为该填充的 1 格轮廓
     pub fill: bool,
     /// 描边线宽笔刷 1/2/4/8，默认 1；填充时忽略
     #[serde(default)]
@@ -229,7 +231,7 @@ pub struct RegionRequest {
 
 /// One drawing step inside `draw_batch`. Discriminated by `type`.
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DrawOp {
     /// 直线
     Line {
@@ -265,22 +267,22 @@ pub enum DrawOp {
         #[serde(default)]
         brush: Option<u32>,
     },
-    /// 圆
+    /// 圆。左上角 (x,y) 与直径 diameter（≥1，超过 512 按 512）
     Circle {
-        cx: u32,
-        cy: u32,
-        radius: u32,
+        x: u32,
+        y: u32,
+        diameter: u32,
         color: String,
         fill: bool,
         #[serde(default)]
         brush: Option<u32>,
     },
-    /// 椭圆
+    /// 椭圆。左上角 (x,y)，宽 width、高 height（≥1，超过 512 按 512）
     Ellipse {
-        cx: u32,
-        cy: u32,
-        rx: u32,
-        ry: u32,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
         color: String,
         fill: bool,
         #[serde(default)]
@@ -568,14 +570,14 @@ impl PixelDraw {
     }
 
     #[tool(
-        description = "画圆。仅用于大面积绘制，细节请尽量用像素绘制。圆心 (cx,cy) 与半径 radius（0 为单点）；圆心必须在图纸内，半径超出部分自动裁剪（超过 256 按 256）。fill=true 填充，fill=false 描边。描边可用 brush（1/2/4/8，默认 1）加粗；填充忽略 brush。返回 8 倍放大 PNG，可据预览继续修改和调整。"
+        description = "画圆。仅用于大面积绘制，细节请尽量用像素绘制。左上角 (x,y) 为占据方形的锚点，直径 diameter 为 ≥1 的整数（超过 512 按 512）；圆占 diameter×diameter 格，格心落在圆内才计入。锚点必须在图纸内，右侧和下方超出部分裁剪。fill=true 填充，fill=false 取该填充的 1 格轮廓。描边可用 brush（1/2/4/8，默认 1）向右下加粗；填充忽略 brush。旧参数 cx、cy、radius 会报错。返回 8 倍放大 PNG，可据预览继续修改和调整。"
     )]
     async fn draw_circle(
         &self,
         Parameters(DrawCircleRequest {
-            cx,
-            cy,
-            radius,
+            x,
+            y,
+            diameter,
             color,
             fill,
             brush,
@@ -583,21 +585,21 @@ impl PixelDraw {
     ) -> Result<CallToolResult, McpError> {
         self.with_canvas(|canvas| {
             let brush = BrushSize::parse(brush)?;
-            canvas.paint_circle(cx, cy, radius, &color, fill, brush)
+            canvas.paint_circle(x, y, diameter, &color, fill, brush)
         })
         .await
     }
 
     #[tool(
-        description = "画椭圆。仅用于大面积绘制，细节请尽量用像素绘制。圆心 (cx,cy)，水平半径 rx、垂直半径 ry（可为 0，退化为线或点）；圆心必须在图纸内，越界部分裁剪（轴长超过 256 按 256）。fill=true 填充，fill=false 描边。描边可用 brush（1/2/4/8，默认 1）加粗；填充忽略 brush。返回 8 倍放大 PNG，可据预览继续修改和调整。"
+        description = "画椭圆。仅用于大面积绘制，细节请尽量用像素绘制。左上角 (x,y) 为占据矩形的锚点，宽 width、高 height 为 ≥1 的整数（超过 512 按 512）；椭圆占 width×height 格，格心落在椭圆内才计入。宽高相等时与同直径的圆逐格相同。锚点必须在图纸内，右侧和下方超出部分裁剪。fill=true 填充，fill=false 取该填充的 1 格轮廓。描边可用 brush（1/2/4/8，默认 1）向右下加粗；填充忽略 brush。旧参数 cx、cy、rx、ry 会报错。返回 8 倍放大 PNG，可据预览继续修改和调整。"
     )]
     async fn draw_ellipse(
         &self,
         Parameters(DrawEllipseRequest {
-            cx,
-            cy,
-            rx,
-            ry,
+            x,
+            y,
+            width,
+            height,
             color,
             fill,
             brush,
@@ -605,7 +607,7 @@ impl PixelDraw {
     ) -> Result<CallToolResult, McpError> {
         self.with_canvas(|canvas| {
             let brush = BrushSize::parse(brush)?;
-            canvas.paint_ellipse(cx, cy, rx, ry, &color, fill, brush)
+            canvas.paint_ellipse(x, y, width, height, &color, fill, brush)
         })
         .await
     }
@@ -911,7 +913,7 @@ impl ServerHandler for PixelDraw {
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(
-                "PixelDraw：用强约束像素指令绘图，不要直接文生图。尽量使用像素绘制；其他图元仅用于大面积绘制。多笔绘制请一次调用 draw_batch（ops 有序数组，原子执行，只回最终预览）；单笔可用 draw_line / draw_rect / draw_triangle / draw_circle / draw_ellipse / draw_curve / flood_fill / fill_background / draw_pixels / move_region / copy_region。禁止并行调用多个绘制工具，会打乱顺序。流程：create_canvas(width, height, palette?, background?, background_color?) 建图并锁定色表 → draw_batch 或单笔工具作画 → 看 8 倍预览继续修改调整（画错可用 undo 撤回）→ save_image 保存。矩形、三角形、圆、椭圆用 fill=true|false 区分填充/描边；直线、曲线与描边可用 brush=1|2|4|8 控制线宽（从落点向右下扩展 N×N，与 draw_pixels 足迹一致）。draw_curve 的 points 为 [x,y] 列表：2 点直线、3 点二次贝塞尔、4 点三次贝塞尔、≥5 点过点平滑样条。fill_background 用一种颜色覆盖整张图纸的每一个格子，并把当前背景色改为该颜色。move_region 把矩形区域（含空格）搬到 dx/dy 或 tx/ty 指定的位置，源区域改回当前背景色；copy_region 同样搬运但保留源区域。两组寻址只能给一组，源端点或目标越界整次拒绝。draw_pixels 与 flood_fill 可用 - 清除为空格（不是 H2 白豆）；background 可选 white（默认）或 empty；background_color 可选，用色表颜色铺满并记为当前背景色。list_colors 只在需要查色时调用。颜色只用当前模式的中文名或 MARD 色号。save_image 的 output 可选 pixel（默认 8 倍 PNG）、pattern（拼豆图纸）或 both；不覆盖已有文件。",
+                "PixelDraw：用强约束像素指令绘图，不要直接文生图。尽量使用像素绘制；其他图元仅用于大面积绘制。多笔绘制请一次调用 draw_batch（ops 有序数组，原子执行，只回最终预览）；单笔可用 draw_line / draw_rect / draw_triangle / draw_circle / draw_ellipse / draw_curve / flood_fill / fill_background / draw_pixels / move_region / copy_region。禁止并行调用多个绘制工具，会打乱顺序。流程：create_canvas(width, height, palette?, background?, background_color?) 建图并锁定色表 → draw_batch 或单笔工具作画 → 看 8 倍预览继续修改调整（画错可用 undo 撤回）→ save_image 保存。矩形、三角形、圆、椭圆用 fill=true|false 区分填充/描边；直线、曲线与描边可用 brush=1|2|4|8 控制线宽（从落点向右下扩展 N×N，与 draw_pixels 足迹一致）。圆用左上角 (x,y) 与直径 diameter，椭圆用左上角 (x,y)、宽 width 与高 height（均为 ≥1 的整数，超过 512 按 512；锚点越界报错，右侧和下方裁剪；旧的 cx/cy/radius/rx/ry 会报错）。draw_curve 的 points 为 [x,y] 列表：2 点直线、3 点二次贝塞尔、4 点三次贝塞尔、≥5 点过点平滑样条。fill_background 用一种颜色覆盖整张图纸的每一个格子，并把当前背景色改为该颜色。move_region 把矩形区域（含空格）搬到 dx/dy 或 tx/ty 指定的位置，源区域改回当前背景色；copy_region 同样搬运但保留源区域。两组寻址只能给一组，源端点或目标越界整次拒绝。draw_pixels 与 flood_fill 可用 - 清除为空格（不是 H2 白豆）；background 可选 white（默认）或 empty；background_color 可选，用色表颜色铺满并记为当前背景色。list_colors 只在需要查色时调用。颜色只用当前模式的中文名或 MARD 色号。save_image 的 output 可选 pixel（默认 8 倍 PNG）、pattern（拼豆图纸）或 both；不覆盖已有文件。",
             )
     }
 }
@@ -956,27 +958,27 @@ fn apply_draw_op(canvas: &mut Canvas, op: &DrawOp) -> Result<usize, CanvasError>
             canvas.paint_triangle(*x0, *y0, *x1, *y1, *x2, *y2, color, *fill, brush)
         }
         DrawOp::Circle {
-            cx,
-            cy,
-            radius,
+            x,
+            y,
+            diameter,
             color,
             fill,
             brush,
         } => {
             let brush = BrushSize::parse(*brush)?;
-            canvas.paint_circle(*cx, *cy, *radius, color, *fill, brush)
+            canvas.paint_circle(*x, *y, *diameter, color, *fill, brush)
         }
         DrawOp::Ellipse {
-            cx,
-            cy,
-            rx,
-            ry,
+            x,
+            y,
+            width,
+            height,
             color,
             fill,
             brush,
         } => {
             let brush = BrushSize::parse(*brush)?;
-            canvas.paint_ellipse(*cx, *cy, *rx, *ry, color, *fill, brush)
+            canvas.paint_ellipse(*x, *y, *width, *height, color, *fill, brush)
         }
         DrawOp::Curve {
             points,
@@ -1294,6 +1296,77 @@ mod tests {
     }
 
     #[test]
+    fn circle_and_ellipse_reject_old_and_missing_parameters() {
+        let circle: DrawCircleRequest =
+            serde_json::from_str(r#"{"x":1,"y":2,"diameter":4,"color":"纯黑","fill":true}"#)
+                .unwrap();
+        assert_eq!((circle.x, circle.y, circle.diameter), (1, 2, 4));
+        assert!(circle.brush.is_none());
+        let ellipse: DrawEllipseRequest = serde_json::from_str(
+            r#"{"x":0,"y":0,"width":3,"height":5,"color":"纯黑","fill":false,"brush":2}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            (ellipse.width, ellipse.height, ellipse.brush),
+            (3, 5, Some(2))
+        );
+
+        for json in [
+            r#"{"x":0,"y":0,"diameter":4,"color":"纯黑","fill":true,"cx":1}"#,
+            r#"{"x":0,"y":0,"diameter":4,"color":"纯黑","fill":true,"cy":1}"#,
+            r#"{"x":0,"y":0,"diameter":4,"color":"纯黑","fill":true,"radius":1}"#,
+            r#"{"cx":1,"cy":1,"radius":2,"color":"纯黑","fill":true}"#,
+            r#"{"x":0,"y":0,"color":"纯黑","fill":true}"#,
+            r#"{"x":0,"y":0,"diameter":-1,"color":"纯黑","fill":true}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<DrawCircleRequest>(json).is_err(),
+                "{json}"
+            );
+        }
+        for json in [
+            r#"{"x":0,"y":0,"width":4,"height":2,"color":"纯黑","fill":true,"rx":1}"#,
+            r#"{"x":0,"y":0,"width":4,"height":2,"color":"纯黑","fill":true,"ry":1}"#,
+            r#"{"cx":1,"cy":1,"rx":2,"ry":1,"color":"纯黑","fill":true}"#,
+            r#"{"x":0,"y":0,"width":4,"color":"纯黑","fill":true}"#,
+            r#"{"x":0,"y":0,"width":4,"height":-2,"color":"纯黑","fill":true}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<DrawEllipseRequest>(json).is_err(),
+                "{json}"
+            );
+        }
+        assert!(serde_json::from_str::<DrawOp>(
+            r#"{"type":"circle","x":0,"y":0,"diameter":4,"color":"纯黑","fill":true,"radius":1}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<DrawOp>(
+            r#"{"type":"ellipse","x":0,"y":0,"width":4,"height":2,"color":"纯黑","fill":true,"cx":0}"#
+        )
+        .is_err());
+        assert!(
+            serde_json::from_str::<DrawOp>(
+                r#"{"type":"circle","cx":0,"cy":0,"radius":2,"color":"纯黑","fill":true}"#
+            )
+            .is_err()
+        );
+        let op: DrawOp = serde_json::from_str(
+            r#"{"type":"circle","x":1,"y":2,"diameter":8,"color":"纯黑","fill":false}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            op,
+            DrawOp::Circle {
+                x: 1,
+                y: 2,
+                diameter: 8,
+                fill: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn export_set_retries_names_and_reports_late_failures() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("a-pattern.png"), b"keep").unwrap();
@@ -1608,9 +1681,9 @@ mod tests {
             .draw_batch(Parameters(DrawBatchRequest {
                 ops: vec![
                     DrawOp::Circle {
-                        cx: 1,
-                        cy: 1,
-                        radius: 1,
+                        x: 1,
+                        y: 1,
+                        diameter: 1,
                         color: "明黄".into(),
                         fill: true,
                         brush: None,
@@ -1640,6 +1713,141 @@ mod tests {
         assert_eq!(
             server.canvas.lock().await.as_ref().unwrap().codes(),
             before_codes
+        );
+    }
+
+    #[tokio::test]
+    async fn circle_and_ellipse_are_one_undo_and_bad_batch_is_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = PixelDraw::new(dir.path().to_path_buf());
+        server
+            .create_canvas(Parameters(CreateCanvasRequest {
+                background: Background::White,
+                background_color: None,
+                width: 16,
+                height: 16,
+                palette: Some("24".into()),
+            }))
+            .await
+            .unwrap();
+        let blank = server
+            .canvas
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .encode_png_8x()
+            .unwrap();
+
+        let drawn = server
+            .draw_circle(Parameters(DrawCircleRequest {
+                x: 1,
+                y: 1,
+                diameter: 9,
+                color: "纯黑".into(),
+                fill: true,
+                brush: None,
+            }))
+            .await
+            .unwrap();
+        assert_ne!(drawn.is_error, Some(true));
+        assert_eq!(server.canvas.lock().await.as_ref().unwrap().undo_len(), 1);
+
+        let ellipse = server
+            .draw_ellipse(Parameters(DrawEllipseRequest {
+                x: 0,
+                y: 0,
+                width: 9,
+                height: 9,
+                color: "中国红".into(),
+                fill: true,
+                brush: Some(8),
+            }))
+            .await
+            .unwrap();
+        assert_ne!(ellipse.is_error, Some(true));
+        assert_eq!(server.canvas.lock().await.as_ref().unwrap().undo_len(), 2);
+        // Same width and height as the circle, but a different anchor, so the
+        // second step is visible. One undo removes only the ellipse.
+        let undone = server
+            .undo(Parameters(UndoRequest { steps: Some(1) }))
+            .await
+            .unwrap();
+        assert_ne!(undone.is_error, Some(true));
+        assert_eq!(server.canvas.lock().await.as_ref().unwrap().undo_len(), 1);
+
+        let before = server
+            .canvas
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .encode_png_8x()
+            .unwrap();
+        let bad = server
+            .draw_batch(Parameters(DrawBatchRequest {
+                ops: vec![
+                    DrawOp::Line {
+                        x0: 0,
+                        y0: 0,
+                        x1: 4,
+                        y1: 0,
+                        color: "明黄".into(),
+                        brush: Some(1),
+                    },
+                    DrawOp::Circle {
+                        x: 0,
+                        y: 0,
+                        diameter: 0,
+                        color: "纯黑".into(),
+                        fill: true,
+                        brush: None,
+                    },
+                ],
+            }))
+            .await
+            .unwrap();
+        assert_eq!(bad.is_error, Some(true));
+        assert!(bad.content[0].as_text().unwrap().text.contains("直径"));
+        let oob = server
+            .draw_batch(Parameters(DrawBatchRequest {
+                ops: vec![DrawOp::Ellipse {
+                    x: 16,
+                    y: 0,
+                    width: 4,
+                    height: 4,
+                    color: "纯黑".into(),
+                    fill: false,
+                    brush: None,
+                }],
+            }))
+            .await
+            .unwrap();
+        assert_eq!(oob.is_error, Some(true));
+        let after = server
+            .canvas
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .encode_png_8x()
+            .unwrap();
+        assert_eq!(before, after);
+        assert_eq!(server.canvas.lock().await.as_ref().unwrap().undo_len(), 1);
+        server
+            .undo(Parameters(UndoRequest { steps: None }))
+            .await
+            .unwrap();
+        assert_eq!(
+            server
+                .canvas
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .encode_png_8x()
+                .unwrap(),
+            blank
         );
     }
 

@@ -46,7 +46,7 @@ impl Process {
         stdin.flush().expect("flush JSON-RPC");
     }
 
-    fn request(&mut self, id: u64, method: &str, params: Value) -> Value {
+    fn exchange(&mut self, id: u64, method: &str, params: Value) -> Value {
         self.send(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
         let deadline = Instant::now() + TIMEOUT;
         loop {
@@ -61,9 +61,14 @@ impl Process {
                 continue;
             }
             assert_eq!(response["id"], id, "{response}");
-            assert!(response.get("error").is_none(), "{response}");
-            return response.get("result").expect("JSON-RPC result").clone();
+            return response;
         }
+    }
+
+    fn request(&mut self, id: u64, method: &str, params: Value) -> Value {
+        let response = self.exchange(id, method, params);
+        assert!(response.get("error").is_none(), "{response}");
+        response.get("result").expect("JSON-RPC result").clone()
     }
 
     fn wait(&mut self) -> ExitStatus {
@@ -756,4 +761,269 @@ fn stdio_move_region_changes_preview_and_pattern_codes() {
         std::fs::read(output.path().join("moved.png")).unwrap(),
         std::fs::read(output.path().join("moved-control.png")).unwrap()
     );
+}
+
+fn tool_failed(response: &Value) -> bool {
+    response.get("error").is_some() || response["result"]["isError"] == true
+}
+
+fn cell(image: &image::RgbImage, x: u32, y: u32) -> [u8; 3] {
+    image.get_pixel(x * 8, y * 8).0
+}
+
+#[test]
+fn stdio_circle_and_ellipse_use_diameter() {
+    let output = tempfile::tempdir().unwrap();
+    let mut process = Process::spawn(
+        output.path(),
+        &[
+            std::ffi::OsStr::new("--output-dir"),
+            output.path().as_os_str(),
+        ],
+    );
+    process.request(
+        1,
+        "initialize",
+        json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "circle-diameter-test", "version": "1"}
+        }),
+    );
+    process.send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+
+    let listed = process.request(2, "tools/list", json!({}));
+    let tools = listed["tools"].as_array().expect("tools");
+    let circle = tools
+        .iter()
+        .find(|tool| tool["name"] == "draw_circle")
+        .expect("draw_circle");
+    let ellipse = tools
+        .iter()
+        .find(|tool| tool["name"] == "draw_ellipse")
+        .expect("draw_ellipse");
+    let circle_desc = circle["description"].as_str().unwrap();
+    assert!(circle_desc.contains("直径"));
+    assert!(circle_desc.contains("diameter"));
+    assert!(ellipse["description"].as_str().unwrap().contains("width"));
+    let circle_props = &circle["inputSchema"]["properties"];
+    for name in ["x", "y", "diameter", "color", "fill"] {
+        assert!(circle_props[name].is_object(), "{circle_props}");
+    }
+    for retired in ["cx", "cy", "radius"] {
+        assert!(circle_props.get(retired).is_none(), "{circle_props}");
+    }
+    let ellipse_props = &ellipse["inputSchema"]["properties"];
+    for name in ["x", "y", "width", "height"] {
+        assert!(ellipse_props[name].is_object(), "{ellipse_props}");
+    }
+    for retired in ["cx", "cy", "rx", "ry"] {
+        assert!(ellipse_props.get(retired).is_none(), "{ellipse_props}");
+    }
+
+    process.request(
+        3,
+        "tools/call",
+        json!({"name":"create_canvas","arguments":{"width":8,"height":8,"palette":"24"}}),
+    );
+    let white = [254, 255, 255];
+    let black = [0, 0, 0];
+
+    let dot = process.request(
+        4,
+        "tools/call",
+        json!({"name":"draw_circle","arguments":{"x":0,"y":0,"diameter":1,"color":"H7","fill":true}}),
+    );
+    let dot_img = image::load_from_memory(&response_png(&dot))
+        .unwrap()
+        .to_rgb8();
+    assert_eq!(cell(&dot_img, 0, 0), black);
+    assert_eq!(cell(&dot_img, 1, 0), white);
+    assert_eq!(cell(&dot_img, 0, 1), white);
+
+    let undone = process.request(5, "tools/call", json!({"name":"undo","arguments":{}}));
+    let blank = image::load_from_memory(&response_png(&undone))
+        .unwrap()
+        .to_rgb8();
+    assert!(blank.pixels().all(|pixel| pixel.0 == white));
+
+    let four = process.request(
+        6,
+        "tools/call",
+        json!({"name":"draw_circle","arguments":{"x":1,"y":1,"diameter":2,"color":"H7","fill":true}}),
+    );
+    let four_img = image::load_from_memory(&response_png(&four))
+        .unwrap()
+        .to_rgb8();
+    for (x, y) in [(1, 1), (2, 1), (1, 2), (2, 2)] {
+        assert_eq!(cell(&four_img, x, y), black, "{x},{y}");
+    }
+    assert_eq!(cell(&four_img, 0, 0), white);
+    assert_eq!(cell(&four_img, 3, 1), white);
+    process.request(7, "tools/call", json!({"name":"undo","arguments":{}}));
+
+    // Diameter 4 anchored at (2, 2): rows of width 2, 4, 4, 2.
+    let disk = process.request(
+        8,
+        "tools/call",
+        json!({"name":"draw_circle","arguments":{"x":2,"y":2,"diameter":4,"color":"H7","fill":true}}),
+    );
+    let disk_png = response_png(&disk);
+    let disk_img = image::load_from_memory(&disk_png).unwrap().to_rgb8();
+    let painted: [(u32, u32); 12] = [
+        (3, 2),
+        (4, 2),
+        (2, 3),
+        (3, 3),
+        (4, 3),
+        (5, 3),
+        (2, 4),
+        (3, 4),
+        (4, 4),
+        (5, 4),
+        (3, 5),
+        (4, 5),
+    ];
+    for x in 0..8u32 {
+        for y in 0..8u32 {
+            let expect = if painted.contains(&(x, y)) {
+                black
+            } else {
+                white
+            };
+            assert_eq!(cell(&disk_img, x, y), expect, "{x},{y}");
+        }
+    }
+
+    let saved = process.request(
+        9,
+        "tools/call",
+        json!({"name":"save_image","arguments":{"filename":"circle","output":"pixel"}}),
+    );
+    assert_eq!(response_png(&saved), disk_png);
+
+    let mut id = 10u64;
+    for arguments in [
+        json!({"x":0,"y":0,"diameter":4,"color":"H7","fill":true,"cx":1,"radius":2}),
+        json!({"cx":1,"cy":1,"radius":2,"color":"H7","fill":true}),
+        json!({"x":0,"y":0,"color":"H7","fill":true}),
+        json!({"x":0,"y":0,"diameter":-1,"color":"H7","fill":true}),
+        json!({"x":0,"y":0,"diameter":0,"color":"H7","fill":true}),
+        json!({"x":8,"y":0,"diameter":4,"color":"H7","fill":true}),
+        json!({"x":0,"y":-1,"diameter":4,"color":"H7","fill":true}),
+    ] {
+        let response = process.exchange(
+            id,
+            "tools/call",
+            json!({"name":"draw_circle","arguments":arguments}),
+        );
+        assert!(tool_failed(&response), "{arguments} -> {response}");
+        id += 1;
+    }
+    for arguments in [
+        json!({"x":0,"y":0,"width":4,"height":3,"color":"H7","fill":true,"rx":1}),
+        json!({"cx":0,"cy":0,"rx":2,"ry":1,"color":"H7","fill":true}),
+        json!({"x":0,"y":0,"width":0,"height":4,"color":"H7","fill":true}),
+    ] {
+        let response = process.exchange(
+            id,
+            "tools/call",
+            json!({"name":"draw_ellipse","arguments":arguments}),
+        );
+        assert!(tool_failed(&response), "{arguments} -> {response}");
+        id += 1;
+    }
+    let bad_batch = process.exchange(
+        id,
+        "tools/call",
+        json!({
+            "name": "draw_batch",
+            "arguments": {"ops": [
+                {"type":"line","x0":0,"y0":0,"x1":3,"y1":0,"color":"A4"},
+                {"type":"circle","x":0,"y":0,"diameter":4,"color":"H7","fill":true,"radius":1}
+            ]}
+        }),
+    );
+    id += 1;
+    assert!(tool_failed(&bad_batch), "{bad_batch}");
+    let zero_batch = process.exchange(
+        id,
+        "tools/call",
+        json!({
+            "name": "draw_batch",
+            "arguments": {"ops": [
+                {"type":"circle","x":0,"y":0,"diameter":0,"color":"H7","fill":true},
+                {"type":"line","x0":0,"y0":0,"x1":3,"y1":0,"color":"A4"}
+            ]}
+        }),
+    );
+    assert!(tool_failed(&zero_batch), "{zero_batch}");
+
+    let still = process.request(
+        id + 1,
+        "tools/call",
+        json!({"name":"save_image","arguments":{"filename":"circle-still","output":"pixel"}}),
+    );
+    assert_eq!(response_png(&still), disk_png);
+
+    let clipped = process.request(
+        id + 2,
+        "tools/call",
+        json!({"name":"draw_circle","arguments":{"x":6,"y":0,"diameter":5,"color":"H7","fill":true}}),
+    );
+    let clipped_img = image::load_from_memory(&response_png(&clipped))
+        .unwrap()
+        .to_rgb8();
+    let overflow = [
+        (7, 0),
+        (6, 1),
+        (7, 1),
+        (6, 2),
+        (7, 2),
+        (6, 3),
+        (7, 3),
+        (7, 4),
+    ];
+    for (x, y) in overflow {
+        assert_eq!(cell(&clipped_img, x, y), black, "clipped {x},{y}");
+    }
+    assert_eq!(cell(&clipped_img, 6, 0), white);
+    assert_eq!(cell(&clipped_img, 5, 2), white);
+
+    process.request(id + 3, "tools/call", json!({"name":"undo","arguments":{}}));
+    process.request(id + 4, "tools/call", json!({"name":"undo","arguments":{}}));
+    let square = process.request(
+        id + 5,
+        "tools/call",
+        json!({"name":"draw_ellipse","arguments":{"x":2,"y":2,"width":4,"height":4,"color":"H7","fill":true}}),
+    );
+    assert_eq!(response_png(&square), disk_png);
+
+    process.request(id + 6, "tools/call", json!({"name":"undo","arguments":{}}));
+    let ring = process.request(
+        id + 7,
+        "tools/call",
+        json!({"name":"draw_circle","arguments":{"x":0,"y":0,"diameter":8,"color":"H7","fill":false,"brush":2}}),
+    );
+    let ring_img = image::load_from_memory(&response_png(&ring))
+        .unwrap()
+        .to_rgb8();
+    assert_eq!(cell(&ring_img, 0, 3), black);
+    for (x, y) in [(3, 3), (4, 3), (3, 4), (4, 4)] {
+        assert_eq!(cell(&ring_img, x, y), white, "brush 2 filled {x},{y}");
+    }
+    let thin = process.request(id + 8, "tools/call", json!({"name":"undo","arguments":{}}));
+    assert_ne!(response_png(&thin), response_png(&ring));
+    let thin_ring = process.request(
+        id + 9,
+        "tools/call",
+        json!({"name":"draw_circle","arguments":{"x":0,"y":0,"diameter":8,"color":"H7","fill":false}}),
+    );
+    let thin_img = image::load_from_memory(&response_png(&thin_ring))
+        .unwrap()
+        .to_rgb8();
+    let thick_count = ring_img.pixels().filter(|pixel| pixel.0 == black).count();
+    let thin_count = thin_img.pixels().filter(|pixel| pixel.0 == black).count();
+    assert!(thick_count > thin_count);
+    assert_eq!(cell(&thin_img, 3, 3), white);
 }

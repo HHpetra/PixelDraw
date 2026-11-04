@@ -96,152 +96,42 @@ fn outline_cells(fill: &[(i32, i32)]) -> Vec<(i32, i32)> {
         .collect()
 }
 
-/// Fill centered spans of half-length `w[offset]`.
+/// Inclusive columns of one ellipse row.
 ///
-/// With `vertical = true` each span runs along y at `x = cx ± offset`;
-/// otherwise spans run along x at `y = cy ± offset`. Callers always span the
-/// *major* axis so an ellipse and the same ellipse rotated by 90° cover
-/// transposed cells.
-fn fill_from_half_lengths(cx: i32, cy: i32, w: &[i32], vertical: bool) -> Vec<(i32, i32)> {
-    let capacity: usize = w
-        .iter()
-        .enumerate()
-        .map(|(offset, &half)| {
-            let width = (2 * half + 1) as usize;
-            if offset == 0 { width } else { width * 2 }
-        })
-        .sum();
-    let mut points = Vec::with_capacity(capacity);
-    for (offset, &half) in w.iter().enumerate() {
-        let offset = offset as i32;
-        for span in -half..=half {
-            if vertical {
-                points.push((cx + offset, cy + span));
-                if offset > 0 {
-                    points.push((cx - offset, cy + span));
-                }
-            } else {
-                points.push((cx + span, cy + offset));
-                if offset > 0 {
-                    points.push((cx + span, cy - offset));
-                }
-            }
-        }
-    }
-    points
+/// `max_dx2` is the greatest squared doubled-offset allowed on this row.
+/// Cell centers sit on odd or even doubled coordinates (same parity as
+/// `1 - width`), so the span is every column whose center satisfies
+/// `|dx|² <= max_dx2`, with no second rounding rule.
+fn column_span(width: i64, max_dx2: i64) -> Option<(i64, i64)> {
+    let max_dx = i64::try_from((max_dx2.max(0) as u64).isqrt()).expect("half-width fits i64");
+    // dx = 2*col + 1 - width, and |dx| <= max_dx.
+    // ceil((width - 1 - max_dx) / 2); the dividend is >= -1 for a real ellipse.
+    let span_start = width - 1 - max_dx;
+    let col_min = (if span_start >= 0 {
+        (span_start + 1) / 2
+    } else {
+        span_start / 2
+    })
+    .max(0);
+    let col_max = ((width - 1 + max_dx) / 2).min(width - 1);
+    (col_min <= col_max).then_some((col_min, col_max))
 }
 
-/// Largest integer `dx ≥ 0` with `dx² ≤ n / d` (real division; `d > 0`).
-fn floor_sqrt_div(n: i64, d: i64) -> i64 {
-    debug_assert!(d > 0);
-    (n / d).isqrt()
+/// Filled pixel circle anchored at the top-left `(x, y)` of its bounding box.
+/// `diameter` is the side length in cells and must be >= 1.
+pub fn circle_fill_points(x: i32, y: i32, diameter: i32) -> Vec<(i32, i32)> {
+    ellipse_fill_points(x, y, diameter, diameter)
 }
 
-/// Half-lengths `w[u]` of a filled ellipse: the extent along the major semi-axis
-/// `b` for every offset `u` along the minor semi-axis `a`.
-///
-/// Each extent is the smaller of
-/// - the half-pixel cover test, which keeps small shapes on the classic bead
-///   outline instead of growing spikes, and
-/// - the analytic extent plus one cell, which stops large and flat shapes from
-///   collapsing into a cone or a box.
-///
-/// Spanning the major axis is what makes `(rx, ry)` and `(ry, rx)` cover
-/// transposed cells: both shapes share this `w` and differ only in whether the
-/// spans run along x or y, so the identity holds for any `w`.
-///
-/// A circle additionally has to be its own transpose, and that is a real
-/// constraint on `w`: the two rules round independently per row, so r=4 came out
-/// as `4,4,4,3,1`, where the row at offset 2 reaches 4 but the pole only spans 1
-/// — a notch that no rotation can match. When `a == b` the staircase is
-/// re-clamped to the largest self-conjugate one that fits, `4,4,3,3,1`.
-fn ellipse_half_lengths(a: i32, b: i32) -> Vec<i32> {
-    let a = a.max(0) as i64;
-    let b = b.max(0) as i64;
-    if a == 0 {
-        return vec![b as i32];
-    }
-    let a2 = a * a;
-    let b2 = b * b;
-    // Cover test with half-pixel axes: (u/(a+.5))² + (v/(b+.5))² ≤ 1,
-    // cleared of fractions by multiplying through.
-    let two_a1 = 2 * a + 1;
-    let two_b1 = 2 * b + 1;
-    let cover_limit = two_a1 * two_a1 * two_b1 * two_b1;
-    let cover_step = 4 * two_b1 * two_b1;
-    let cover_den = 4 * two_a1 * two_a1;
-    let mut w: Vec<i64> = (0..=a)
-        .map(|u| {
-            // Extent inside the true ellipse: u²/a² + v²/b² ≤ 1.
-            let analytic = floor_sqrt_div(b2 * (a2 - u * u), a2);
-            let cover = floor_sqrt_div(cover_limit - cover_step * u * u, cover_den);
-            cover.min(analytic + 1)
-        })
-        .collect();
-
-    if a == b {
-        self_conjugate(&mut w);
-    }
-    w.into_iter().map(|v| v as i32).collect()
+/// 1-cell outline of [`circle_fill_points`]. Same predicate, so the stroke
+/// stays inside the fill.
+pub fn circle_stroke_points(x: i32, y: i32, diameter: i32) -> Vec<(i32, i32)> {
+    ellipse_stroke_points(x, y, diameter, diameter)
 }
 
-/// Replace a non-increasing staircase with the largest self-conjugate one that
-/// fits inside it, so the row extents and the column extents agree.
-///
-/// `w` is self-conjugate when `v ≤ w[u] ⟺ u ≤ w[v]`, i.e. when cell `(u, v)` and
-/// its transpose are both inside or both outside. Each round re-clamps every row
-/// to the column extent against the previous round's staircase; the values only
-/// shrink, so this converges to the greatest fixed point.
-fn self_conjugate(w: &mut [i64]) {
-    loop {
-        // `reach[v]` is the last row whose extent still covers column `v`.
-        let mut reach = vec![0i64; w.len()];
-        let mut row = w.len() as i64 - 1;
-        for (v, slot) in reach.iter_mut().enumerate() {
-            while row > 0 && w[row as usize] < v as i64 {
-                row -= 1;
-            }
-            *slot = row;
-        }
-        let mut changed = false;
-        for (u, cell) in w.iter_mut().enumerate() {
-            let clamped = (*cell).min(reach[u]);
-            changed |= clamped != *cell;
-            *cell = clamped;
-        }
-        if !changed {
-            return;
-        }
-    }
-}
-
-/// Minor semi-axis, major semi-axis, and whether spans run along y.
-fn ellipse_shape(rx: i32, ry: i32) -> (i32, i32, bool) {
-    (rx.min(ry), rx.max(ry), ry > rx)
-}
-
-/// Outline of the filled disk: thin ring, no gaps, matches fill radius.
-pub fn circle_stroke_points(cx: i32, cy: i32, r: i32) -> Vec<(i32, i32)> {
-    ellipse_stroke_points(cx, cy, r, r)
-}
-
-pub fn circle_fill_points(cx: i32, cy: i32, r: i32) -> Vec<(i32, i32)> {
-    ellipse_fill_points(cx, cy, r, r)
-}
-
-pub fn ellipse_stroke_points(cx: i32, cy: i32, rx: i32, ry: i32) -> Vec<(i32, i32)> {
-    if rx <= 0 && ry <= 0 {
-        return vec![(cx, cy)];
-    }
-    if rx <= 0 {
-        return line_points(cx, cy - ry, cx, cy + ry);
-    }
-    if ry <= 0 {
-        return line_points(cx - rx, cy, cx + rx, cy);
-    }
-    // Same contour approach as the circle: keeps the ring gap-free and
-    // on the same boundary as `ellipse_fill_points`.
-    outline_cells(&ellipse_fill_points(cx, cy, rx, ry))
+/// 1-cell outline of [`ellipse_fill_points`].
+pub fn ellipse_stroke_points(x: i32, y: i32, width: i32, height: i32) -> Vec<(i32, i32)> {
+    outline_cells(&ellipse_fill_points(x, y, width, height))
 }
 
 fn edge(ax: i32, ay: i32, bx: i32, by: i32, px: i32, py: i32) -> i64 {
@@ -338,18 +228,44 @@ pub fn triangle_fill_points(
     points
 }
 
-pub fn ellipse_fill_points(cx: i32, cy: i32, rx: i32, ry: i32) -> Vec<(i32, i32)> {
-    if rx <= 0 && ry <= 0 {
-        return vec![(cx, cy)];
+/// Filled pixel ellipse anchored at the top-left `(x, y)`.
+///
+/// A cell `(i, j)` is inside when its center `(i+0.5, j+0.5)` lies in the
+/// ellipse centered at `(x + width/2, y + height/2)` with half-axes
+/// `width/2` and `height/2`. In doubled integers that is
+/// `dx = 2*(i-x)+1-width`, `dy = 2*(j-y)+1-height`, and
+/// `dx² * height² + dy² * width² <= width² * height²`.
+///
+/// Each row takes one half-width from that inequality
+/// (`dx² <= width² * (height² - dy²) / height²`, floored). There is no
+/// half-pixel cover test, no analytic `+1`, and no transpose clamp: the
+/// predicate is symmetric, so a circle is its own transpose and swapping
+/// `width` with `height` swaps the cells.
+///
+/// `width` and `height` must be >= 1. Callers clamp values above 512.
+pub fn ellipse_fill_points(x: i32, y: i32, width: i32, height: i32) -> Vec<(i32, i32)> {
+    if width < 1 || height < 1 {
+        return Vec::new();
     }
-    if rx <= 0 {
-        return line_points(cx, cy - ry.max(0), cx, cy + ry.max(0));
+    let width64 = i64::from(width);
+    let height64 = i64::from(height);
+    let w2 = width64 * width64;
+    let h2 = height64 * height64;
+    let mut points = Vec::new();
+    for row in 0..height {
+        let dy = 2 * i64::from(row) + 1 - height64;
+        let dy2 = dy * dy;
+        debug_assert!(dy2 < h2);
+        let max_dx2 = w2 * (h2 - dy2) / h2;
+        let Some((col_min, col_max)) = column_span(width64, max_dx2) else {
+            continue;
+        };
+        let py = y + row;
+        for col in col_min..=col_max {
+            points.push((x + i32::try_from(col).expect("column fits i32"), py));
+        }
     }
-    if ry <= 0 {
-        return line_points(cx - rx, cy, cx + rx, cy);
-    }
-    let (minor, major, vertical) = ellipse_shape(rx, ry);
-    fill_from_half_lengths(cx, cy, &ellipse_half_lengths(minor, major), vertical)
+    points
 }
 
 /// Connect sampled curve positions with Bresenham lines so short segments stay gap-free.
@@ -492,17 +408,39 @@ mod tests {
         points.iter().copied().collect()
     }
 
-    /// Largest filled `x` on row `y` within `0..=max_x` (row half-width).
-    fn row_half_width(fill: &HashSet<(i32, i32)>, y: i32, max_x: i32) -> i32 {
-        (0..=max_x)
-            .filter(|&x| fill.contains(&(x, y)))
-            .max()
-            .expect("row empty")
+    /// Cells whose centers lie inside the top-left-anchored ellipse.
+    /// Independent of the row half-width formula used by the rasterizer.
+    fn oracle_ellipse(x: i32, y: i32, width: i32, height: i32) -> HashSet<(i32, i32)> {
+        let w = i64::from(width);
+        let h = i64::from(height);
+        let limit = w * w * h * h;
+        let mut cells = HashSet::new();
+        for row in 0..height {
+            for col in 0..width {
+                let dx = 2 * i64::from(col) + 1 - w;
+                let dy = 2 * i64::from(row) + 1 - h;
+                if dx * dx * h * h + dy * dy * w * w <= limit {
+                    cells.insert((x + col, y + row));
+                }
+            }
+        }
+        cells
     }
 
-    /// Mathematical half-width `floor(sqrt(r² − y²))` of a disk.
-    fn true_circle_half(r: i32, y: i32) -> i32 {
-        (((r * r - y * y) as f64).sqrt().floor() as i32).max(0)
+    fn row_width(fill: &HashSet<(i32, i32)>, y: i32, x0: i32, width: i32) -> i32 {
+        (x0..x0 + width).filter(|&x| fill.contains(&(x, y))).count() as i32
+    }
+
+    /// Cells of the top row whose centers satisfy the circle predicate.
+    fn true_top_chord(diameter: i32) -> i32 {
+        let d = i64::from(diameter);
+        (0..d)
+            .filter(|&col| {
+                let dx = 2 * col + 1 - d;
+                let dy = 1 - d;
+                dx * dx + dy * dy <= d * d
+            })
+            .count() as i32
     }
 
     #[test]
@@ -537,151 +475,222 @@ mod tests {
         );
     }
 
-    #[test]
-    fn circle_fill_contains_center_and_outside_empty() {
-        let fill = sorted(circle_fill_points(5, 5, 2));
-        assert!(fill.contains(&(5, 5)));
-        assert!(fill.contains(&(5, 7)));
-        assert!(!fill.contains(&(5, 8)));
-        assert_eq!(circle_fill_points(3, 3, 0), vec![(3, 3)]);
+    fn widths_top_to_bottom(fill: &HashSet<(i32, i32)>, size: i32) -> Vec<i32> {
+        (0..size).map(|y| row_width(fill, y, 0, size)).collect()
     }
 
-    #[test]
-    fn circle_silhouette_is_round_not_conical() {
-        // Classic small bead circles stay smooth; every size keeps the true
-        // equator, a monotone silhouette, and a half-width within 1px of the
-        // mathematical disk (so large radii cannot turn into a cone).
-        for r in 2..=24 {
-            let fill = unique(&circle_fill_points(0, 0, r));
-            let mut prev_half = i32::MAX;
-            for y in 0..=r {
-                let half = row_half_width(&fill, y, r);
-                assert!(
-                    half <= prev_half,
-                    "r={r} y={y}: silhouette grew {prev_half} -> {half}"
-                );
-                let true_half = true_circle_half(r, y);
-                assert!(
-                    (half - true_half).abs() <= 1,
-                    "r={r} y={y}: half={half} too far from true {true_half}"
-                );
-                prev_half = half;
-            }
-            // Equator reaches the full radius.
-            assert_eq!(
-                row_half_width(&fill, 0, r),
-                r,
-                "r={r} equator not full width"
+    /// Row widths from the equator toward the top, inclusive.
+    fn widths_equator_to_top(fill: &HashSet<(i32, i32)>, diameter: i32) -> Vec<i32> {
+        let equator = if diameter % 2 == 0 {
+            diameter / 2 - 1
+        } else {
+            diameter / 2
+        };
+        (0..=equator)
+            .rev()
+            .map(|y| row_width(fill, y, 0, diameter))
+            .collect()
+    }
+
+    fn assert_four_fold(fill: &HashSet<(i32, i32)>, width: i32, height: i32) {
+        for &(x, y) in fill {
+            assert!(
+                fill.contains(&(width - 1 - x, y)),
+                "left-right mismatch at ({x},{y})"
             );
-            // Small circles keep a blunt tip (no 1px spike).
-            if (2..=8).contains(&r) {
-                let top_half = row_half_width(&fill, r, r);
-                assert!(top_half >= 1, "r={r} pole too pointy (half={top_half})");
-            }
+            assert!(
+                fill.contains(&(x, height - 1 - y)),
+                "up-down mismatch at ({x},{y})"
+            );
+            assert!(fill.contains(&(width - 1 - x, height - 1 - y)));
         }
     }
 
     #[test]
-    fn large_circle_is_not_a_cone() {
-        // A global "drop at most 1 per row" floor would leave a huge blunt
-        // tip on large disks (r=256 → half-width ~100). The fill must stay
-        // within 1px of the true circle instead.
-        for r in [32, 64, 128] {
-            let fill = unique(&circle_fill_points(0, 0, r));
-            let tip = row_half_width(&fill, r, r);
-            assert!(tip <= 2, "r={r} tip half={tip} is conical, not circular");
-            let mid = row_half_width(&fill, r / 2, r);
-            let true_half = true_circle_half(r, r / 2);
-            assert!(
-                (mid - true_half).abs() <= 1,
-                "r={r} at y={}: half={mid} vs true {true_half}",
-                r / 2
+    fn circle_diameter_one_is_one_cell_and_two_is_four() {
+        assert_eq!(circle_fill_points(5, 5, 1), vec![(5, 5)]);
+        assert_eq!(
+            sorted(circle_fill_points(3, 4, 2)),
+            vec![(3, 4), (3, 5), (4, 4), (4, 5)]
+        );
+        // Nothing outside the bounding box.
+        let fill = unique(&circle_fill_points(5, 5, 4));
+        assert!(
+            fill.iter()
+                .all(|&(x, y)| (5..9).contains(&x) && (5..9).contains(&y))
+        );
+        assert!(!fill.contains(&(5, 9)));
+        assert!(!fill.contains(&(9, 5)));
+    }
+
+    #[test]
+    fn circle_shape_follows_cell_center_rules() {
+        for diameter in 1..=64 {
+            let fill = unique(&circle_fill_points(0, 0, diameter));
+            assert_eq!(
+                fill,
+                oracle_ellipse(0, 0, diameter, diameter),
+                "d={diameter} drifted from the cell-center predicate"
             );
+            assert_four_fold(&fill, diameter, diameter);
+            let equator = if diameter % 2 == 0 {
+                diameter / 2 - 1
+            } else {
+                diameter / 2
+            };
+            assert_eq!(
+                row_width(&fill, equator, 0, diameter),
+                diameter,
+                "d={diameter} equator"
+            );
+            if diameter % 2 == 0 {
+                assert_eq!(row_width(&fill, diameter / 2, 0, diameter), diameter);
+                let mid = diameter / 2;
+                for &(dx, dy) in &[(-1, -1), (0, -1), (-1, 0), (0, 0)] {
+                    assert!(
+                        fill.contains(&(mid + dx, mid + dy)),
+                        "d={diameter} missing central cell"
+                    );
+                }
+            } else {
+                let mid = diameter / 2;
+                assert!(
+                    fill.contains(&(mid, mid)),
+                    "d={diameter} missing center cell"
+                );
+            }
+            let mut prev = row_width(&fill, equator, 0, diameter);
+            for y in (0..equator).rev() {
+                let width = row_width(&fill, y, 0, diameter);
+                assert!(
+                    width <= prev,
+                    "d={diameter} y={y}: silhouette grew {prev} -> {width}"
+                );
+                prev = width;
+            }
+            assert_eq!(
+                row_width(&fill, 0, 0, diameter),
+                true_top_chord(diameter),
+                "d={diameter} top chord"
+            );
+            if diameter >= 4 {
+                assert!(
+                    row_width(&fill, 0, 0, diameter) < diameter,
+                    "d={diameter} top is as wide as the equator"
+                );
+            }
+        }
+        // Locked silhouettes: equator → top. Diameter 9 used to be 9,9,7,7,3.
+        assert_eq!(
+            widths_equator_to_top(&unique(&circle_fill_points(0, 0, 9)), 9),
+            vec![9, 9, 9, 7, 5]
+        );
+        assert_eq!(
+            widths_equator_to_top(&unique(&circle_fill_points(0, 0, 16)), 16),
+            vec![16, 16, 16, 14, 14, 12, 10, 6]
+        );
+        assert_eq!(
+            widths_top_to_bottom(&unique(&circle_fill_points(0, 0, 9)), 9)[0],
+            5
+        );
+    }
+
+    #[test]
+    fn large_circle_top_matches_the_chord_not_a_cone() {
+        // A "drop at most one cell per row" floor would leave a blunt cone.
+        // The top row is the real chord, much narrower than the equator.
+        for diameter in [32, 64, 128, 256, 512] {
+            let fill = unique(&circle_fill_points(0, 0, diameter));
+            let top = row_width(&fill, 0, 0, diameter);
+            let equator = if diameter % 2 == 0 {
+                diameter / 2 - 1
+            } else {
+                diameter / 2
+            };
+            assert_eq!(row_width(&fill, equator, 0, diameter), diameter);
+            assert_eq!(top, true_top_chord(diameter), "d={diameter}");
+            assert!(top < diameter / 2, "d={diameter} top={top} is conical");
+            assert_eq!(fill, oracle_ellipse(0, 0, diameter, diameter));
         }
     }
 
     #[test]
     fn flat_ellipse_is_not_a_rectangle() {
-        // A wide flat ellipse must stay a thin lens, not a filled box.
-        for &(rx, ry) in &[(20, 1), (20, 2), (15, 4), (7, 4)] {
-            let fill = unique(&ellipse_fill_points(0, 0, rx, ry));
-            let mid = row_half_width(&fill, 0, rx);
-            assert_eq!(mid, rx, "{rx}x{ry} equator not full width");
-            let top = row_half_width(&fill, ry, rx);
-            // True ellipse is a single point at the pole (half=0); allow
-            // the 1px bead-art tip at most.
+        // Height 1 is a bar: every cell center sits on the axis.
+        let bar = unique(&ellipse_fill_points(0, 0, 20, 1));
+        assert_eq!(bar.len(), 20);
+        // A wide flat ellipse is inset from its box. Very flat ones (20×2)
+        // can share one width on both rows; taller ones taper toward the pole.
+        for &(width, height) in &[(20, 2), (20, 4), (15, 4), (32, 3), (7, 4)] {
+            let fill = unique(&ellipse_fill_points(0, 0, width, height));
+            assert_eq!(fill, oracle_ellipse(0, 0, width, height));
             assert!(
-                top <= 1,
-                "{rx}x{ry} top half={top} too wide (true tip is 0/1)"
+                fill.len() < (width * height) as usize,
+                "{width}x{height} filled its box"
             );
-            // Not a box: the top row is much narrower than the equator.
-            assert!(top < rx / 2 + 1, "{rx}x{ry} looks rectangular (top={top})");
+            let mid = if height % 2 == 0 {
+                height / 2 - 1
+            } else {
+                height / 2
+            };
+            let middle = row_width(&fill, mid, 0, width);
+            let top = row_width(&fill, 0, 0, width);
+            assert!(top <= middle, "{width}x{height} top={top} middle={middle}");
+            assert!(top < width, "{width}x{height} top row is the full width");
         }
+        let tapered = unique(&ellipse_fill_points(0, 0, 20, 4));
+        assert!(row_width(&tapered, 0, 0, 20) < row_width(&tapered, 1, 0, 20));
     }
 
     #[test]
-    fn ellipse_is_its_own_transpose() {
-        // (rx, ry) rotated by 90° must cover exactly the transposed cells of
-        // (ry, rx). The old rasterizer walked rows for both axes, so tall
-        // ellipses turned into a 3px banana while wide ones stayed a lens.
-        for rx in 0..=32 {
-            for ry in 0..=32 {
-                let wide = unique(&ellipse_fill_points(0, 0, rx, ry));
-                let tall = unique(&ellipse_fill_points(0, 0, ry, rx));
-                let transpose: HashSet<(i32, i32)> = tall.iter().map(|&(x, y)| (y, x)).collect();
+    fn ellipse_matches_oracle_transpose_and_circle() {
+        for width in 1..=64 {
+            for height in 1..=64 {
+                let fill = unique(&ellipse_fill_points(0, 0, width, height));
                 assert_eq!(
-                    wide, transpose,
-                    "{rx}x{ry} is not the transpose of {ry}x{rx}"
+                    fill,
+                    oracle_ellipse(0, 0, width, height),
+                    "{width}x{height} drifted from the cell-center predicate"
                 );
+                let turned = unique(&ellipse_fill_points(0, 0, height, width));
+                let transpose: HashSet<(i32, i32)> = turned.iter().map(|&(x, y)| (y, x)).collect();
+                assert_eq!(fill, transpose, "{width}x{height} is not the transpose");
+                if width == height {
+                    assert_eq!(fill, unique(&circle_fill_points(0, 0, width)));
+                }
             }
         }
-        // Non-square axes share one staircase, so this also holds at the cap.
-        for &(rx, ry) in &[(256, 3), (3, 256), (256, 255), (1, 128), (128, 1)] {
-            let wide = unique(&ellipse_fill_points(0, 0, rx, ry));
-            let tall = unique(&ellipse_fill_points(0, 0, ry, rx));
-            let transpose: HashSet<(i32, i32)> = tall.iter().map(|&(x, y)| (y, x)).collect();
-            assert_eq!(wide, transpose, "{rx}x{ry} transpose mismatch");
-        }
-    }
-
-    #[test]
-    fn circles_are_transpose_symmetric_at_every_size() {
-        // A circle is its own transpose, which is a real constraint on the
-        // staircase: the cover and analytic rules round per row, so r=4 used to
-        // yield 4,4,4,3,1 — a notch no rotation could match.
-        for r in 0..=64 {
-            let fill = unique(&circle_fill_points(0, 0, r));
-            let transpose: HashSet<(i32, i32)> = fill.iter().map(|&(x, y)| (y, x)).collect();
-            assert_eq!(fill, transpose, "r={r} is not its own transpose");
-        }
-    }
-
-    #[test]
-    fn tall_ellipse_keeps_its_width() {
-        // A 3x12 ellipse is a lens on its side: the middle rows must be ~7 wide
-        // and the ends must taper to a single cell, not stay 3 across.
-        let fill = unique(&ellipse_fill_points(0, 0, 3, 12));
-        let row_width = |y: i32| {
-            fill.iter()
-                .filter(|&&(_, cy)| cy == y)
-                .map(|&(x, _)| x)
-                .fold(None::<(i32, i32)>, |acc, x| match acc {
-                    None => Some((x, x)),
-                    Some((lo, hi)) => Some((lo.min(x), hi.max(x))),
-                })
-                .map(|(lo, hi)| hi - lo + 1)
-                .unwrap_or(0)
-        };
-        assert_eq!(row_width(0), 7, "equator width");
-        assert_eq!(row_width(12), 1, "pole must taper to one cell");
-        assert_eq!(row_width(-12), 1, "pole must taper to one cell");
-        for y in 1..12 {
-            assert!(
-                row_width(y) <= row_width(y - 1),
-                "y={y} widens again: {} > {}",
-                row_width(y),
-                row_width(y - 1)
+        for &(x, y, width, height) in &[
+            (5, 7, 9, 16),
+            (1, 0, 2, 2),
+            (4, 4, 1, 8),
+            (-3, 2, 15, 6),
+            (0, 0, 512, 3),
+            (0, 0, 3, 512),
+            (2, 2, 512, 512),
+        ] {
+            assert_eq!(
+                unique(&ellipse_fill_points(x, y, width, height)),
+                oracle_ellipse(x, y, width, height),
+                "anchor ({x},{y}) {width}x{height}"
             );
+        }
+    }
+
+    #[test]
+    fn tall_ellipse_tapers_to_a_single_cell() {
+        // A 3×12 ellipse fills its equator and tapers to one cell at each pole.
+        let fill = unique(&ellipse_fill_points(2, 1, 3, 12));
+        assert_eq!(fill, oracle_ellipse(2, 1, 3, 12));
+        assert_eq!(row_width(&fill, 1 + 5, 2, 3), 3, "equator width");
+        assert_eq!(row_width(&fill, 1 + 6, 2, 3), 3, "equator width");
+        assert_eq!(row_width(&fill, 1, 2, 3), 1, "top pole");
+        assert_eq!(row_width(&fill, 1 + 11, 2, 3), 1, "bottom pole");
+        let mut prev = 3;
+        for y in (1..1 + 5).rev() {
+            let width = row_width(&fill, y, 2, 3);
+            assert!(width <= prev, "y={y} widened to {width} from {prev}");
+            prev = width;
         }
     }
 
@@ -701,12 +710,23 @@ mod tests {
 
     #[test]
     fn ellipse_fill_covers_axis_extents() {
-        let fill = sorted(ellipse_fill_points(4, 4, 3, 1));
-        assert!(fill.contains(&(4, 4)));
-        assert!(fill.contains(&(1, 4)));
-        assert!(fill.contains(&(7, 4)));
+        // 7×3 ellipse anchored at (4, 4): equator is the full middle row,
+        // the bounding box is y = 4..=6, and the corners of that box are outside.
+        let fill = unique(&ellipse_fill_points(4, 4, 7, 3));
+        assert_eq!(fill, oracle_ellipse(4, 4, 7, 3));
         assert!(fill.contains(&(4, 5)));
-        assert!(!fill.contains(&(4, 6)));
+        assert!(fill.contains(&(10, 5)));
+        assert!(fill.contains(&(7, 5)));
+        assert!(
+            !fill.contains(&(4, 4)),
+            "corner of the box is outside the ellipse"
+        );
+        assert!(!fill.contains(&(7, 3)));
+        assert!(!fill.contains(&(7, 7)));
+        assert!(
+            fill.iter()
+                .all(|&(x, y)| (4..11).contains(&x) && (4..7).contains(&y))
+        );
     }
 
     #[test]
@@ -928,74 +948,62 @@ mod tests {
         }
     }
 
+    fn interior_cells(fill: &HashSet<(i32, i32)>) -> HashSet<(i32, i32)> {
+        fill.iter()
+            .copied()
+            .filter(|&(x, y)| {
+                fill.contains(&(x + 1, y))
+                    && fill.contains(&(x - 1, y))
+                    && fill.contains(&(x, y + 1))
+                    && fill.contains(&(x, y - 1))
+            })
+            .collect()
+    }
+
+    fn assert_stroke_outline(fill: &HashSet<(i32, i32)>, stroke: &HashSet<(i32, i32)>) {
+        assert!(
+            stroke.is_subset(fill),
+            "stroke outside fill: {:?}",
+            stroke.difference(fill).take(8).collect::<Vec<_>>()
+        );
+        assert!(
+            stroke.is_disjoint(&interior_cells(fill)),
+            "stroke filled the interior"
+        );
+        assert!(is_8_connected_region(stroke), "stroke is not 8-connected");
+    }
+
     #[test]
-    fn circle_stroke_is_a_thin_ring_not_a_disk() {
-        let r = 5;
-        let stroke = unique(&circle_stroke_points(8, 8, r));
-        assert!(!stroke.contains(&(8, 8)), "stroke filled the center");
-        assert!(!stroke.contains(&(8, 9)), "stroke filled near-center");
-        assert!(!stroke.contains(&(8, 10)), "stroke filled interior");
-        assert!(is_8_connected_region(&stroke), "ring has gaps");
-        // Thin ring: circumference order, not a disk.
-        let fill = unique(&circle_fill_points(8, 8, r));
-        assert!(fill.contains(&(8, 8)));
-        assert!(
-            stroke.len() * 2 < fill.len(),
-            "stroke looks filled: {} vs {}",
-            stroke.len(),
-            fill.len()
-        );
-        assert!(
-            (4 * r as usize..=12 * r as usize).contains(&stroke.len()),
-            "ring unnaturally sparse or thick: {}",
-            stroke.len()
-        );
-        // Every stroke cell sits on a ~1px annulus around radius r
-        // (midpoint stroke and analytic fill may differ on the boundary pixel).
-        for &(x, y) in &stroke {
-            let dist2 = (x - 8) as i64 * (x - 8) as i64 + (y - 8) as i64 * (y - 8) as i64;
-            let lo = (r as i64 - 1) * (r as i64 - 1);
-            let hi = (r as i64 + 1) * (r as i64 + 1);
-            assert!(
-                (lo..=hi).contains(&dist2),
-                "stroke cell ({x},{y}) is off the rim (dist²={dist2})"
-            );
+    fn circle_stroke_is_the_outline_of_the_fill() {
+        for diameter in 1..=64 {
+            let fill = unique(&circle_fill_points(2, 3, diameter));
+            let stroke = unique(&circle_stroke_points(2, 3, diameter));
+            assert_stroke_outline(&fill, &stroke);
+            if diameter >= 8 {
+                assert!(
+                    stroke.len() * 2 < fill.len(),
+                    "d={diameter} stroke looks filled: {} vs {}",
+                    stroke.len(),
+                    fill.len()
+                );
+            }
         }
-        // Stroke is the contour of the same fill: never outside the disk.
-        assert!(
-            stroke.is_subset(&fill),
-            "stroke cells outside fill: {:?}",
-            stroke.difference(&fill).collect::<Vec<_>>()
-        );
+        // Diameter 9 anchored at (1, 1): the unique center cell is interior.
+        let stroke = unique(&circle_stroke_points(1, 1, 9));
+        assert!(!stroke.contains(&(5, 5)));
+        let fill = unique(&circle_fill_points(1, 1, 9));
+        assert!(fill.contains(&(5, 5)));
     }
 
     #[test]
     fn ellipse_stroke_is_hollow_and_connected() {
-        let (cx, cy, rx, ry) = (10, 8, 7, 4);
-        let stroke = unique(&ellipse_stroke_points(cx, cy, rx, ry));
-        assert!(!stroke.contains(&(cx, cy)), "ellipse stroke filled center");
-        assert!(
-            !stroke.contains(&(cx, cy + 1)),
-            "ellipse stroke filled interior"
-        );
-        assert!(is_8_connected_region(&stroke), "ellipse ring has gaps");
-        let fill = unique(&ellipse_fill_points(cx, cy, rx, ry));
-        assert!(fill.contains(&(cx, cy)));
-        assert!(stroke.len() * 2 < fill.len());
-        assert!(
-            stroke.is_subset(&fill),
-            "ellipse stroke cells outside fill: {:?}",
-            stroke.difference(&fill).collect::<Vec<_>>()
-        );
-        // Rim cells stay near the ellipse boundary (normalized distance ≈ 1).
-        for &(x, y) in &stroke {
-            let dx = (x - cx) as f64 / rx as f64;
-            let dy = (y - cy) as f64 / ry as f64;
-            let n = (dx * dx + dy * dy).sqrt();
-            assert!(
-                (0.5..=1.5).contains(&n),
-                "stroke cell ({x},{y}) is off the ellipse rim (norm={n:.2})"
-            );
+        for &(width, height) in &[(9, 9), (16, 10), (7, 4), (4, 12), (2, 2), (1, 8)] {
+            let fill = unique(&ellipse_fill_points(1, 2, width, height));
+            let stroke = unique(&ellipse_stroke_points(1, 2, width, height));
+            assert_stroke_outline(&fill, &stroke);
+            if width >= 8 && height >= 8 {
+                assert!(stroke.len() * 2 < fill.len());
+            }
         }
     }
 
