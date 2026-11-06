@@ -12,7 +12,7 @@ PixelDraw itself needs no API key and exposes no network listener.
 
 PixelDraw gives an AI assistant a small drawing workspace. You describe what
 to draw in your MCP client; the assistant creates a canvas and draws with lines,
-rectangles, triangles, circles, ellipses, curves, flood fill, a full-canvas background fill, or pixel stamps. After each pass it
+rectangles, triangles, circles, ellipses, diamonds, curves, flood fill, a full-canvas background fill, or pixel stamps. After each pass it
 reviews the returned preview, keeps adjusting (undo is available), then saves when satisfied.
 
 - **Precise pixel placement:** draw on a 1..128 pixel-wide and -high canvas
@@ -201,6 +201,7 @@ Each file is saved atomically. `both` checks both names before writing, so exist
 | `draw_triangle` | Triangle; `fill` selects filled vs stroked, stroke uses `brush` width. |
 | `draw_circle` | Circle anchored at top-left `(x, y)` with integer `diameter` ≥ 1 (values above 512 clamp to 512). Occupies `diameter × diameter` cells; a cell is painted when its center lies inside. Anchor must be on the canvas; right and bottom overflow is clipped. `fill` selects the disk or its 1-cell outline. Stroke uses `brush`; fill ignores it. |
 | `draw_ellipse` | Ellipse anchored at top-left `(x, y)` with integer `width` and `height` ≥ 1 (values above 512 clamp to 512). Same center-in-ellipse rule. `width == height` matches `draw_circle` of that diameter. Anchor, clipping, `fill`, and `brush` match the circle. |
+| `draw_diamond` | Pixel diamond centered on cell `(cx, cy)`, not top-left anchored. `rx` and `ry` are diamond half-axes (cells from the center to one side), not the retired ellipse `rx`/`ry`. Width and height are `2*rx+1` and `2*ry+1` (always odd). A cell is painted when its center lies inside (`abs(di)*ry + abs(dj)*rx ≤ rx*ry`, with `di = x-cx` and `dj = y-cy`). Values above 255 clamp to 255. The center must be on the canvas; parts past the edge are clipped. `fill: false` is the 1-cell outline of that fill. Stroke uses `brush`; fill ignores it. Also a `draw_batch` op (`type: diamond`). |
 | `draw_curve` | Curve through `[x,y]` points: 2=line, 3=quadratic Bezier, 4=cubic Bezier, 5+=Catmull-Rom through every point. |
 | `flood_fill` | Four-connected fill of the seed's current bead code; empty cells are distinct from H2 white beads. Use `-` to clear a region back to empty. |
 | `fill_background` | Overwrites every cell with one palette color (MARD code or Chinese name), including empty cells and existing artwork, and sets the remembered background color to that color. Invalid colors leave the canvas and its background color unchanged. One undo step when any cell changes or the remembered color differs; no step when both already match. Undo restores the previous background color. Also a `draw_batch` op. |
@@ -225,7 +226,13 @@ Each file is saved atomically. `both` checks both names before writing, so exist
   `width`, and `height` are integers ≥ 1; values above 512 are treated as 512.
   Cells past the right or bottom edge are clipped. A cell is included when its
   center lies inside the ellipse. `fill: false` paints the 1-cell outline of
-  that fill. Old names `cx`, `cy`, `radius`, `rx`, and `ry` are rejected.
+  that fill. On circle and ellipse, the old names `cx`, `cy`, `radius`, `rx`,
+  and `ry` are rejected.
+  `draw_diamond` is centered on cell `(cx, cy)`, which must be on the canvas;
+  it is not top-left anchored. `rx` and `ry` are diamond half-axes (not the
+  retired ellipse axes): width and height are `2*rx+1` and `2*ry+1` (always
+  odd). Values above 255 are treated as 255. Parts past the edge are clipped.
+  `fill: false` is the 1-cell outline of that fill.
   Line ends, curve points, and flood-fill seeds must stay inside the canvas.
   A region move or copy is rejected entirely when a source endpoint or the
   destination rectangle falls outside the canvas; the canvas and undo history

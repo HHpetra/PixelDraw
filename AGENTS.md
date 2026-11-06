@@ -15,13 +15,14 @@
    - `draw_triangle({ x0, y0, x1, y1, x2, y2, color, fill, brush? })` 三角形；`fill` 同上
    - `draw_circle({ x, y, diameter, color, fill, brush? })` 圆；`fill` 同上。左上角锚定，占据 `diameter×diameter` 格；格心落在圆内才计入
    - `draw_ellipse({ x, y, width, height, color, fill, brush? })` 椭圆；`fill` 同上。占据 `width×height` 格；宽高相等时与同直径的圆逐格相同
+   - `draw_diamond({ cx, cy, rx, ry, color, fill, brush? })` 像素菱形；`fill` 同上。(cx, cy) 是中心格，不是左上角锚定。rx、ry 是菱形半轴，宽高为 `2*rx+1` 与 `2*ry+1`（总是奇数）。格心落在菱形内才计入。`fill: false` 取该填充的 1 格轮廓。中心格必须在图纸内，越出边缘的部分裁剪。半轴超过 255 按 255。这里的 rx、ry 是菱形半轴，与已废止的椭圆 rx、ry 不是同一参数
    - `draw_curve({ points: [[x,y], ...], color, brush? })` 曲线；2 点直线、3 点二次贝塞尔、4 点三次贝塞尔、≥5 点过点平滑样条（Catmull-Rom）
    - `flood_fill({ x, y, color })` 油漆桶，四连通替换种子点同色号区域；空格与 H2 白豆分开处理；`color` 可用 `-` 清为空格
    - `fill_background({ color })` 用当前色表的中文名或 MARD 色号强行覆盖整张图纸的每一个格子（已有画面、空格和其他颜色都会被替换），并把已记录的当前背景色改为该颜色。与 `flood_fill` 不同，不停在色块边界，也不接受 `-`。颜色非法时画布与背景色都不变。有格子变化，或当前背景色与新颜色不同时，记一次 undo；格子和背景色都已是该颜色时不改动、不记 undo。`undo` 会一并恢复之前的背景色
    - `draw_pixels({ pixels: "0 0 正红 0 1 纯黑", brush? })` 散点/方块笔刷落点；用 `-` 清除为空格（不是 H2 白豆）
    - `move_region({ x0, y0, x1, y1, dx?, dy?, tx?, ty? })` 移动区域：源矩形含端点，反序按 `rect_bounds` 规范化。整块读入（含空格）后再擦源、写目标，重叠搬运结果正确。源区域写入当前背景色（背景为空格时留空格），不改变已记录的背景色。`dx,dy` 为相对位移（可负），`tx,ty` 为目标左上角绝对坐标；二者互斥，必须且只能给一组。内容与搬运结果逐格相同时不修改画布、不记 undo
    - `copy_region({ x0, y0, x1, y1, dx?, dy?, tx?, ty? })` 复制区域：参数与移动相同，源区域保留，空格照常覆盖目标
-   - `draw_batch({ ops })` 多笔有序批量；`ops` 项用 `type` 区分 line/rect/triangle/circle/ellipse/curve/flood_fill/fill_background/pixels/move_region/copy_region
+   - `draw_batch({ ops })` 多笔有序批量；`ops` 项用 `type` 区分 line/rect/triangle/circle/ellipse/diamond/curve/flood_fill/fill_background/pixels/move_region/copy_region
 3. `list_colors` 只在需要查色时调用，**不是**作画必经步骤。
 4. 每次绘制工具都会返回当前图纸放大 8 倍（最近邻）后的 PNG；画完可以出图看看效果，再继续修改和调整。画错可用 `undo({ steps? })` 撤回；每次成功的绘制调用记一步，`draw_batch` 整批记一步，`create_canvas` 会清空历史。
 5. 完成后调用 `save_image({ filename?, output?: "pixel" | "pattern" | "both" })`。默认 `pixel` 为 8 倍像素画；`pattern` 为拼豆图纸（四边序号、逐格色号、自中心每 10 格计数线、色号与数量图例）；`both` 同时导出（第二张文件名加 `-pattern`）。空格留白不计数，H2 是白豆。保存到 `--output-dir` 目录，不覆盖已有文件；只接受文件名，不接受路径。
@@ -32,11 +33,11 @@
 
 **画笔大小 `brush`** 只能是 `1`、`2`、`4`、`8`，**默认 `1`**：
 - 所有粗笔刷都从落点 `(x, y)` 向右下涂满 `N×N` 方块（与 `draw_pixels` 足迹一致）：同一坐标同一 `brush` 覆盖相同格子。
-- 对 `draw_line`、`draw_curve` 与描边模式的矩形/圆/椭圆：表示线宽，坐标**不必**对齐网格，越界部分裁剪。
+- 对 `draw_line`、`draw_curve` 与描边模式的矩形/圆/椭圆/菱形：表示线宽，坐标**不必**对齐网格，越界部分裁剪。
 - 对 `draw_pixels`：`x`、`y` 必须是 `N` 的倍数（不吸附）。例如 `brush: 2` 只能落在 `0,2,4,6…`。
 - 填充模式与 `flood_fill` 忽略 `brush`。
 
-颜色非法时整批拒绝。图元端点、曲线路径点、种子点越界报错。圆和椭圆的锚点 `(x, y)` 必须在图纸内；`diameter`、`width`、`height` 为 ≥ 1 的整数，超过 512 时按 512 计算；右侧和下方超出部分自动裁剪。旧参数 `cx`、`cy`、`radius`、`rx`、`ry` 会报错，不静默忽略。`draw_pixels` 笔刷未对齐或方块出界时整批拒绝。区域搬运的源端点越界，或目标区域越界，整次拒绝、画布不变、不记 undo。
+颜色非法时整批拒绝。图元端点、曲线路径点、种子点越界报错。圆和椭圆的锚点 `(x, y)` 必须在图纸内；`diameter`、`width`、`height` 为 ≥ 1 的整数，超过 512 时按 512 计算；右侧和下方超出部分自动裁剪。圆和椭圆上的旧参数 `cx`、`cy`、`radius`、`rx`、`ry` 会报错，不静默忽略。像素菱形的中心格 `(cx, cy)` 必须在图纸内；`rx`、`ry` 是菱形半轴（非负整数，超过 255 按 255），宽高为 `2*rx+1` 与 `2*ry+1`；越出边缘的部分裁剪。这组 `rx`/`ry` 不是已废止的椭圆半轴，也不是左上角锚定。`draw_pixels` 笔刷未对齐或方块出界时整批拒绝。区域搬运的源端点越界，或目标区域越界，整次拒绝、画布不变、不记 undo。
 
 ## 24 色表
 

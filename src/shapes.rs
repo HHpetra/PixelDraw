@@ -268,6 +268,39 @@ pub fn ellipse_fill_points(x: i32, y: i32, width: i32, height: i32) -> Vec<(i32,
     points
 }
 
+/// Filled pixel diamond centered on cell `(cx, cy)`.
+///
+/// `rx` and `ry` are non-negative diamond half-axes: cells from the center to
+/// one side. The diamond occupies `(2*rx+1) × (2*ry+1)` cells. A cell
+/// `(x, y)` is inside when its center lies in the diamond, i.e.
+/// `|x-cx|*ry + |y-cy|*rx <= rx*ry`. There is no coverage test and no second
+/// rule. `rx = 0` is a vertical bar, `ry = 0` is a horizontal bar, and both
+/// 0 is the center cell — the same inequality, with no special case.
+/// Callers clamp half-axes above 255.
+pub fn diamond_fill_points(cx: i32, cy: i32, rx: i32, ry: i32) -> Vec<(i32, i32)> {
+    let rx64 = i64::from(rx);
+    let ry64 = i64::from(ry);
+    let limit = rx64 * ry64;
+    let mut points = Vec::new();
+    for dj in -ry..=ry {
+        let abs_dj = i64::from(dj.abs());
+        let py = cy + dj;
+        for di in -rx..=rx {
+            let abs_di = i64::from(di.abs());
+            if abs_di * ry64 + abs_dj * rx64 <= limit {
+                points.push((cx + di, py));
+            }
+        }
+    }
+    points
+}
+
+/// 1-cell outline of [`diamond_fill_points`]. Same predicate as circle and
+/// ellipse strokes: a filled cell with a 4-neighbor outside the fill.
+pub fn diamond_stroke_points(cx: i32, cy: i32, rx: i32, ry: i32) -> Vec<(i32, i32)> {
+    outline_cells(&diamond_fill_points(cx, cy, rx, ry))
+}
+
 /// Connect sampled curve positions with Bresenham lines so short segments stay gap-free.
 fn chain_samples(samples: &[(f64, f64)]) -> Vec<(i32, i32)> {
     let mut points = Vec::new();
@@ -1005,6 +1038,162 @@ mod tests {
                 assert!(stroke.len() * 2 < fill.len());
             }
         }
+    }
+
+    /// Cells whose centers lie in the L1 diamond `|di|*ry + |dj|*rx <= rx*ry`.
+    /// Independent of [`diamond_fill_points`].
+    fn oracle_diamond(cx: i32, cy: i32, rx: i32, ry: i32) -> HashSet<(i32, i32)> {
+        let mut cells = HashSet::new();
+        let limit = i64::from(rx) * i64::from(ry);
+        for y in (cy - ry)..=(cy + ry) {
+            for x in (cx - rx)..=(cx + rx) {
+                let di = i64::from(x - cx).abs();
+                let dj = i64::from(y - cy).abs();
+                if di * i64::from(ry) + dj * i64::from(rx) <= limit {
+                    cells.insert((x, y));
+                }
+            }
+        }
+        cells
+    }
+
+    fn assert_diamond_extent(fill: &HashSet<(i32, i32)>, cx: i32, cy: i32, rx: i32, ry: i32) {
+        assert_eq!(fill.iter().map(|p| p.0).min(), Some(cx - rx));
+        assert_eq!(fill.iter().map(|p| p.0).max(), Some(cx + rx));
+        assert_eq!(fill.iter().map(|p| p.1).min(), Some(cy - ry));
+        assert_eq!(fill.iter().map(|p| p.1).max(), Some(cy + ry));
+        assert!(fill.iter().all(|&(x, y)| {
+            (cx - rx..=cx + rx).contains(&x) && (cy - ry..=cy + ry).contains(&y)
+        }));
+        assert!(fill.contains(&(cx + rx, cy)), "missing right tip");
+        assert!(fill.contains(&(cx - rx, cy)), "missing left tip");
+        assert!(fill.contains(&(cx, cy + ry)), "missing bottom tip");
+        assert!(fill.contains(&(cx, cy - ry)), "missing top tip");
+    }
+
+    fn assert_diamond_symmetry(fill: &HashSet<(i32, i32)>, cx: i32, cy: i32) {
+        for &(x, y) in fill {
+            let di = x - cx;
+            let dj = y - cy;
+            for (sx, sy) in [(di, dj), (-di, dj), (di, -dj), (-di, -dj)] {
+                assert!(
+                    fill.contains(&(cx + sx, cy + sy)),
+                    "symmetry broke at ({x},{y}) -> ({},{})",
+                    cx + sx,
+                    cy + sy
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn diamond_matches_cell_center_oracle() {
+        for rx in 0..=32 {
+            for ry in 0..=32 {
+                let fill = unique(&diamond_fill_points(0, 0, rx, ry));
+                assert_eq!(
+                    fill,
+                    oracle_diamond(0, 0, rx, ry),
+                    "rx={rx} ry={ry} drifted from the cell-center predicate"
+                );
+                assert_diamond_extent(&fill, 0, 0, rx, ry);
+                assert_diamond_symmetry(&fill, 0, 0);
+                let turned = unique(&diamond_fill_points(0, 0, ry, rx));
+                let transpose: HashSet<(i32, i32)> = turned.iter().map(|&(x, y)| (y, x)).collect();
+                assert_eq!(fill, transpose, "rx={rx} ry={ry} is not the transpose");
+                if rx == ry {
+                    assert_eq!(fill, turned, "rx={rx} is not a square diamond");
+                    if rx >= 1 {
+                        assert!(
+                            !fill.contains(&(rx, ry)),
+                            "rx={rx} filled the bounding-box corner"
+                        );
+                    }
+                    for y in -rx..=rx {
+                        for x in -rx..=rx {
+                            assert_eq!(
+                                fill.contains(&(x, y)),
+                                x.abs() + y.abs() <= rx,
+                                "square diamond ({x},{y}) rx={rx}"
+                            );
+                        }
+                    }
+                }
+                if rx == 0 && ry == 0 {
+                    assert_eq!(fill, HashSet::from([(0, 0)]));
+                } else if rx == 0 {
+                    assert!(
+                        fill.iter().all(|&(x, _)| x == 0),
+                        "rx=0 is not a vertical bar"
+                    );
+                    assert_eq!(fill.len(), (2 * ry + 1) as usize);
+                } else if ry == 0 {
+                    assert!(
+                        fill.iter().all(|&(_, y)| y == 0),
+                        "ry=0 is not a horizontal bar"
+                    );
+                    assert_eq!(fill.len(), (2 * rx + 1) as usize);
+                }
+            }
+        }
+        for &(cx, cy, rx, ry) in &[
+            (5, 7, 9, 4),
+            (1, 0, 0, 0),
+            (4, 4, 0, 6),
+            (3, 8, 11, 0),
+            (-3, 2, 15, 6),
+            (0, 0, 255, 255),
+            (0, 0, 255, 0),
+            (0, 0, 0, 255),
+            (2, 3, 255, 1),
+            (1, 1, 128, 64),
+            (8, 8, 64, 128),
+        ] {
+            let fill = unique(&diamond_fill_points(cx, cy, rx, ry));
+            assert_eq!(
+                fill,
+                oracle_diamond(cx, cy, rx, ry),
+                "center ({cx},{cy}) rx={rx} ry={ry}"
+            );
+            assert_diamond_extent(&fill, cx, cy, rx, ry);
+            assert_diamond_symmetry(&fill, cx, cy);
+            let swapped = unique(&diamond_fill_points(cx, cy, ry, rx));
+            let transpose: HashSet<(i32, i32)> = fill
+                .iter()
+                .map(|&(x, y)| (cx + (y - cy), cy + (x - cx)))
+                .collect();
+            assert_eq!(swapped, transpose, "transpose ({cx},{cy}) {rx},{ry}");
+        }
+    }
+
+    #[test]
+    fn diamond_stroke_is_the_outline_of_the_fill() {
+        for rx in 0..=16 {
+            for ry in 0..=16 {
+                let fill = unique(&diamond_fill_points(2, 3, rx, ry));
+                let stroke = unique(&diamond_stroke_points(2, 3, rx, ry));
+                assert_stroke_outline(&fill, &stroke);
+                if rx >= 4 && ry >= 4 {
+                    assert!(
+                        stroke.len() * 2 < fill.len(),
+                        "rx={rx} ry={ry} stroke looks filled: {} vs {}",
+                        stroke.len(),
+                        fill.len()
+                    );
+                }
+            }
+        }
+        for &(cx, cy, rx, ry) in &[(1, 1, 8, 5), (0, 0, 12, 12), (4, 2, 6, 20), (3, 3, 20, 7)] {
+            let fill = unique(&diamond_fill_points(cx, cy, rx, ry));
+            let stroke = unique(&diamond_stroke_points(cx, cy, rx, ry));
+            assert_stroke_outline(&fill, &stroke);
+            assert!(stroke.len() * 2 < fill.len());
+        }
+        // rx = ry = 2 centered at (4, 4): the center cell is interior.
+        let stroke = unique(&diamond_stroke_points(4, 4, 2, 2));
+        assert!(!stroke.contains(&(4, 4)));
+        let fill = unique(&diamond_fill_points(4, 4, 2, 2));
+        assert!(fill.contains(&(4, 4)));
     }
 
     #[test]
