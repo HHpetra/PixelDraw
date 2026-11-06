@@ -10,6 +10,9 @@ pub const SCALE: u32 = 8;
 /// Diameters and ellipse axes larger than this are capped before rasterization.
 /// Same order of magnitude as the old radius cap of 256 (`diameter = 2×radius + 1`).
 pub const MAX_AXIS: u32 = 512;
+/// Diamond half-axes larger than this are capped before rasterization.
+/// Width and height are `2*r+1`, so 255 stays inside the 512 scale (max side 511).
+pub const MAX_DIAMOND_HALF_AXIS: u32 = 255;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum BrushSize {
@@ -593,6 +596,34 @@ impl Canvas {
         self.paint_shape_points(&points, color, brush)
     }
 
+    /// Pixel diamond centered on cell `(cx, cy)`.
+    ///
+    /// `rx` and `ry` are diamond half-axes. Values above [`MAX_DIAMOND_HALF_AXIS`]
+    /// are clamped. Width and height are `2*rx+1` and `2*ry+1`. The center must
+    /// lie on the canvas. Cells past any edge are clipped.
+    #[allow(clippy::too_many_arguments)] // Coordinates mirror the drawing tool parameters.
+    pub fn paint_diamond(
+        &mut self,
+        cx: u32,
+        cy: u32,
+        rx: u32,
+        ry: u32,
+        color: &str,
+        fill: bool,
+        brush: BrushSize,
+    ) -> Result<usize, CanvasError> {
+        self.require_point(cx, cy)?;
+        let rx = rx.min(MAX_DIAMOND_HALF_AXIS) as i32;
+        let ry = ry.min(MAX_DIAMOND_HALF_AXIS) as i32;
+        let points = if fill {
+            shapes::diamond_fill_points(cx as i32, cy as i32, rx, ry)
+        } else {
+            shapes::diamond_stroke_points(cx as i32, cy as i32, rx, ry)
+        };
+        let brush = if fill { BrushSize::One } else { brush };
+        self.paint_shape_points(&points, color, brush)
+    }
+
     /// Smooth curve through waypoints:
     /// 2 points draw a line, 3 points a quadratic Bezier, 4 points a cubic Bezier,
     /// and 5+ points a Catmull-Rom spline through every waypoint.
@@ -1067,6 +1098,15 @@ mod tests {
         for fill in [false, true] {
             assert_drawing_state(|c, color, brush| {
                 c.paint_ellipse(1, 1, 3, 2, color, fill, brush).unwrap();
+            });
+        }
+    }
+
+    #[test]
+    fn diamond_keeps_bead_state() {
+        for fill in [false, true] {
+            assert_drawing_state(|c, color, brush| {
+                c.paint_diamond(4, 4, 3, 2, color, fill, brush).unwrap();
             });
         }
     }
@@ -2309,6 +2349,199 @@ mod tests {
         for cell in [(8, 8), (9, 8), (8, 9), (9, 9)] {
             assert!(!cells.contains(&cell), "ellipse brush filled {cell:?}");
         }
+    }
+
+    #[test]
+    fn diamond_matches_pixels_and_records_one_undo() {
+        let mut canvas = Canvas::new(16, 16, PaletteMode::Colors24).unwrap();
+        let before = canvas.clone();
+        let err = canvas
+            .paint_diamond(4, 4, 3, 2, "彩虹", true, BrushSize::One)
+            .unwrap_err();
+        assert!(matches!(err, CanvasError::UnknownColor { .. }));
+        assert_eq!(canvas.pixels, before.pixels);
+        assert_eq!(canvas.codes(), before.codes());
+        assert_eq!(canvas.undo_len(), 0);
+
+        let oob = canvas
+            .paint_diamond(16, 0, 2, 2, "纯黑", true, BrushSize::One)
+            .unwrap_err();
+        assert!(matches!(oob, CanvasError::OutOfBounds { x: 16, y: 0, .. }));
+        assert_eq!(canvas.undo_len(), 0);
+        assert_eq!(canvas.pixels, before.pixels);
+
+        canvas
+            .paint_diamond(6, 5, 3, 2, "纯黑", true, BrushSize::Eight)
+            .unwrap();
+        assert_eq!(canvas.undo_len(), 1);
+        let cells = cells_with(&canvas, black());
+        let mut via_pixels = Canvas::new(16, 16, PaletteMode::Colors24).unwrap();
+        let updates: Vec<_> = cells.iter().map(|&(x, y)| stamp(x, y, "H7")).collect();
+        via_pixels.paint(&updates, BrushSize::One).unwrap();
+        assert_eq!(canvas.codes(), via_pixels.codes());
+        assert_eq!(canvas.pixels, via_pixels.pixels);
+        assert_eq!(
+            canvas.encode_png_8x().unwrap(),
+            via_pixels.encode_png_8x().unwrap()
+        );
+        assert_eq!(
+            crate::pattern::counts(&canvas),
+            crate::pattern::counts(&via_pixels)
+        );
+
+        let expected: HashSet<(u32, u32)> = shapes::diamond_fill_points(6, 5, 3, 2)
+            .into_iter()
+            .filter(|&(x, y)| (0..16).contains(&x) && (0..16).contains(&y))
+            .map(|(x, y)| (x as u32, y as u32))
+            .collect();
+        assert_eq!(cells, expected);
+        // Brush is ignored for fills: the same diamond with brush 1 matches.
+        let mut thin = Canvas::new(16, 16, PaletteMode::Colors24).unwrap();
+        thin.paint_diamond(6, 5, 3, 2, "纯黑", true, BrushSize::One)
+            .unwrap();
+        assert_eq!(canvas.pixels, thin.pixels);
+
+        let after = canvas.pixels.clone();
+        canvas
+            .paint_diamond(2, 2, 4, 4, "正红", false, BrushSize::One)
+            .unwrap();
+        assert_eq!(canvas.undo_len(), 2);
+        canvas.undo(1).unwrap();
+        assert_eq!(canvas.pixels, after);
+        assert_eq!(canvas.undo_len(), 1);
+    }
+
+    #[test]
+    fn diamond_clips_past_the_edge_and_caps_half_axes() {
+        let mut canvas = Canvas::new(8, 8, PaletteMode::Colors24).unwrap();
+        let written = canvas
+            .paint_diamond(0, 0, 3, 2, "纯黑", true, BrushSize::One)
+            .unwrap();
+        let cells = cells_with(&canvas, black());
+        let expected: HashSet<(u32, u32)> = shapes::diamond_fill_points(0, 0, 3, 2)
+            .into_iter()
+            .filter(|&(x, y)| (0..8).contains(&x) && (0..8).contains(&y))
+            .map(|(x, y)| (x as u32, y as u32))
+            .collect();
+        assert_eq!(cells, expected);
+        assert_eq!(written, expected.len());
+        assert!(
+            shapes::diamond_fill_points(0, 0, 3, 2)
+                .iter()
+                .any(|&(x, y)| x < 0 || y < 0),
+            "fixture should extend past the top-left"
+        );
+        assert!(cells.contains(&(0, 0)));
+        assert!(!cells.contains(&(3, 2)));
+
+        let mut right = Canvas::new(8, 8, PaletteMode::Colors24).unwrap();
+        right
+            .paint_diamond(7, 3, 3, 2, "纯黑", true, BrushSize::One)
+            .unwrap();
+        let right_cells = cells_with(&right, black());
+        let right_expected: HashSet<(u32, u32)> = shapes::diamond_fill_points(7, 3, 3, 2)
+            .into_iter()
+            .filter(|&(x, y)| (0..8).contains(&x) && (0..8).contains(&y))
+            .map(|(x, y)| (x as u32, y as u32))
+            .collect();
+        assert_eq!(right_cells, right_expected);
+        assert!(
+            shapes::diamond_fill_points(7, 3, 3, 2)
+                .iter()
+                .any(|&(x, _)| x >= 8)
+        );
+
+        let mut huge = Canvas::new(128, 128, PaletteMode::Colors24).unwrap();
+        huge.paint_diamond(0, 0, u32::MAX, 200, "纯黑", true, BrushSize::One)
+            .unwrap();
+        let mut capped = Canvas::new(128, 128, PaletteMode::Colors24).unwrap();
+        capped
+            .paint_diamond(
+                0,
+                0,
+                MAX_DIAMOND_HALF_AXIS,
+                200,
+                "纯黑",
+                true,
+                BrushSize::One,
+            )
+            .unwrap();
+        assert_eq!(huge.pixels, capped.pixels);
+        let mut also = Canvas::new(128, 128, PaletteMode::Colors24).unwrap();
+        also.paint_diamond(
+            0,
+            0,
+            MAX_DIAMOND_HALF_AXIS + 1,
+            200,
+            "纯黑",
+            true,
+            BrushSize::One,
+        )
+        .unwrap();
+        assert_eq!(huge.pixels, also.pixels);
+        let mut smaller = Canvas::new(128, 128, PaletteMode::Colors24).unwrap();
+        smaller
+            .paint_diamond(
+                0,
+                0,
+                MAX_DIAMOND_HALF_AXIS - 1,
+                200,
+                "纯黑",
+                true,
+                BrushSize::One,
+            )
+            .unwrap();
+        assert_ne!(huge.pixels, smaller.pixels);
+
+        let mut tall = Canvas::new(128, 128, PaletteMode::Colors24).unwrap();
+        tall.paint_diamond(0, 0, 200, u32::MAX, "纯黑", true, BrushSize::One)
+            .unwrap();
+        let mut tall_cap = Canvas::new(128, 128, PaletteMode::Colors24).unwrap();
+        tall_cap
+            .paint_diamond(
+                0,
+                0,
+                200,
+                MAX_DIAMOND_HALF_AXIS,
+                "纯黑",
+                true,
+                BrushSize::One,
+            )
+            .unwrap();
+        assert_eq!(tall.pixels, tall_cap.pixels);
+    }
+
+    #[test]
+    fn diamond_stroke_stays_hollow_and_brush_thickens_it() {
+        let mut thin = Canvas::new(24, 24, PaletteMode::Colors24).unwrap();
+        thin.paint_diamond(10, 10, 6, 5, "纯黑", false, BrushSize::One)
+            .unwrap();
+        let thin_cells = cells_with(&thin, black());
+        let fill: HashSet<(u32, u32)> = shapes::diamond_fill_points(10, 10, 6, 5)
+            .into_iter()
+            .map(|(x, y)| (x as u32, y as u32))
+            .collect();
+        assert!(fill.contains(&(10, 10)));
+        assert!(
+            !thin_cells.contains(&(10, 10)),
+            "diamond stroke filled center"
+        );
+        assert!(thin_cells.is_subset(&fill));
+        assert!(is_8_connected_region(&thin_cells));
+        assert!(thin_cells.len() * 2 < fill.len());
+
+        let mut thick = Canvas::new(24, 24, PaletteMode::Colors24).unwrap();
+        thick
+            .paint_diamond(10, 10, 6, 5, "纯黑", false, BrushSize::Two)
+            .unwrap();
+        let thick_cells = cells_with(&thick, black());
+        assert!(thin_cells.is_subset(&thick_cells));
+        assert!(thick_cells.len() > thin_cells.len());
+        assert!(
+            !thick_cells.contains(&(10, 10)),
+            "brush 2 filled the center"
+        );
+        assert!(is_8_connected_region(&thick_cells));
     }
 
     #[test]

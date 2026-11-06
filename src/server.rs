@@ -171,6 +171,26 @@ pub struct DrawEllipseRequest {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DrawDiamondRequest {
+    /// 中心格 X，必须在图纸内。不是左上角锚点；越过边缘的部分裁剪
+    pub cx: u32,
+    /// 中心格 Y，必须在图纸内。不是左上角锚点；越过边缘的部分裁剪
+    pub cy: u32,
+    /// 水平菱形半轴（从中心格向一侧的格数）。宽度为 2*rx+1。超过 255 按 255。不是已废止的椭圆 rx
+    pub rx: u32,
+    /// 垂直菱形半轴（从中心格向一侧的格数）。高度为 2*ry+1。超过 255 按 255。不是已废止的椭圆 ry
+    pub ry: u32,
+    /// 颜色
+    pub color: String,
+    /// true 为填充，false 为该填充的 1 格轮廓
+    pub fill: bool,
+    /// 描边线宽笔刷 1/2/4/8，默认 1；填充时忽略
+    #[serde(default)]
+    pub brush: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct DrawCurveRequest {
     /// 路径点列表，每项为 [x, y]，至少 2 个点，且都必须在图纸内。
     /// 2 点画直线；3 点为二次贝塞尔（中点为控制点）；4 点为三次贝塞尔（中间两点为控制点）；5 点及以上为过点平滑样条（Catmull-Rom，曲线经过每个点）。
@@ -283,6 +303,17 @@ pub enum DrawOp {
         y: u32,
         width: u32,
         height: u32,
+        color: String,
+        fill: bool,
+        #[serde(default)]
+        brush: Option<u32>,
+    },
+    /// 像素菱形。中心格 (cx, cy) 与菱形半轴 rx、ry（宽高为 2*r+1，超过 255 按 255）
+    Diamond {
+        cx: u32,
+        cy: u32,
+        rx: u32,
+        ry: u32,
         color: String,
         fill: bool,
         #[serde(default)]
@@ -420,7 +451,7 @@ impl PixelDraw {
         let png = encode_or_internal(guard.as_ref().expect("canvas just stored"))?;
         image_result(
             format!(
-                "已创建 {width}x{height} 像素图纸，背景为 {label}，已锁定 {} 色模式。直接用 draw_line / draw_rect / draw_triangle / draw_circle / draw_ellipse / draw_curve / flood_fill / fill_background / draw_pixels / move_region / copy_region 画出图形；需要查色时再 list_colors。画完可查看返回的预览图，再继续修改和调整；画错可用 undo 撤回。绘制中途不能切换色表。fill_background 会把当前背景色更新为新的颜色。",
+                "已创建 {width}x{height} 像素图纸，背景为 {label}，已锁定 {} 色模式。直接用 draw_line / draw_rect / draw_triangle / draw_circle / draw_ellipse / draw_diamond / draw_curve / flood_fill / fill_background / draw_pixels / move_region / copy_region 画出图形；需要查色时再 list_colors。画完可查看返回的预览图，再继续修改和调整；画错可用 undo 撤回。绘制中途不能切换色表。fill_background 会把当前背景色更新为新的颜色。",
                 mode.as_str()
             ),
             png,
@@ -613,6 +644,28 @@ impl PixelDraw {
     }
 
     #[tool(
+        description = "画像素菱形。仅用于大面积绘制，细节请尽量用像素绘制。(cx, cy) 是中心格，不是左上角锚定；rx、ry 是菱形半轴（从中心格沿水平或垂直方向延伸到边的格数，非负整数），宽高分别是 2*rx+1 与 2*ry+1，因此总是奇数。这里的 rx、ry 是菱形半轴，不是已废止的椭圆 rx、ry（椭圆已改用宽高，且可以是偶数）。格心落在菱形内才计入。半轴超过 255 按 255。中心格必须在图纸内，越过边缘的部分裁剪。fill=true 填充，fill=false 取该填充的 1 格轮廓。描边可用 brush（1/2/4/8，默认 1）向右下加粗；填充忽略 brush。返回 8 倍放大 PNG，可据预览继续修改和调整。"
+    )]
+    async fn draw_diamond(
+        &self,
+        Parameters(DrawDiamondRequest {
+            cx,
+            cy,
+            rx,
+            ry,
+            color,
+            fill,
+            brush,
+        }): Parameters<DrawDiamondRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        self.with_canvas(|canvas| {
+            let brush = BrushSize::parse(brush)?;
+            canvas.paint_diamond(cx, cy, rx, ry, &color, fill, brush)
+        })
+        .await
+    }
+
+    #[tool(
         description = "画曲线。仅用于大面积绘制，细节请尽量用像素绘制。points 为 [x,y] 路径点列表，至少 2 个点且都必须在图纸内：2 点画直线；3 点为二次贝塞尔（中间点是控制点）；4 点为三次贝塞尔（中间两点是控制点）；5 点及以上为过点平滑样条（Catmull-Rom，曲线经过每一个点）。可选 brush 为线宽 1/2/4/8（默认 1），从落点向右下扩展 N×N（与 draw_pixels 一致），坐标不必对齐网格。返回 8 倍放大 PNG，可据预览继续修改和调整。"
     )]
     async fn draw_curve(
@@ -770,7 +823,7 @@ impl PixelDraw {
     }
 
     #[tool(
-        description = "批量绘制：将多条有序操作一次提交、原子执行，只返回最终一张预览。适合需要多笔时一次画完，避免并行调用多个绘制工具造成顺序混乱。ops 数组按顺序执行，每项用 type 区分：line / rect / triangle / circle / ellipse / curve / flood_fill / fill_background / pixels / move_region / copy_region（参数与对应单笔工具相同）。任一步非法则整批拒绝且画布不变。成功时整批只记一次 undo。最多 256 步。尽量使用像素绘制；大面积再用本工具的图元。"
+        description = "批量绘制：将多条有序操作一次提交、原子执行，只返回最终一张预览。适合需要多笔时一次画完，避免并行调用多个绘制工具造成顺序混乱。ops 数组按顺序执行，每项用 type 区分：line / rect / triangle / circle / ellipse / diamond / curve / flood_fill / fill_background / pixels / move_region / copy_region（参数与对应单笔工具相同）。任一步非法则整批拒绝且画布不变。成功时整批只记一次 undo。最多 256 步。尽量使用像素绘制；大面积再用本工具的图元。"
     )]
     async fn draw_batch(
         &self,
@@ -913,7 +966,7 @@ impl ServerHandler for PixelDraw {
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(
-                "PixelDraw：用强约束像素指令绘图，不要直接文生图。尽量使用像素绘制；其他图元仅用于大面积绘制。多笔绘制请一次调用 draw_batch（ops 有序数组，原子执行，只回最终预览）；单笔可用 draw_line / draw_rect / draw_triangle / draw_circle / draw_ellipse / draw_curve / flood_fill / fill_background / draw_pixels / move_region / copy_region。禁止并行调用多个绘制工具，会打乱顺序。流程：create_canvas(width, height, palette?, background?, background_color?) 建图并锁定色表 → draw_batch 或单笔工具作画 → 看 8 倍预览继续修改调整（画错可用 undo 撤回）→ save_image 保存。矩形、三角形、圆、椭圆用 fill=true|false 区分填充/描边；直线、曲线与描边可用 brush=1|2|4|8 控制线宽（从落点向右下扩展 N×N，与 draw_pixels 足迹一致）。圆用左上角 (x,y) 与直径 diameter，椭圆用左上角 (x,y)、宽 width 与高 height（均为 ≥1 的整数，超过 512 按 512；锚点越界报错，右侧和下方裁剪；旧的 cx/cy/radius/rx/ry 会报错）。draw_curve 的 points 为 [x,y] 列表：2 点直线、3 点二次贝塞尔、4 点三次贝塞尔、≥5 点过点平滑样条。fill_background 用一种颜色覆盖整张图纸的每一个格子，并把当前背景色改为该颜色。move_region 把矩形区域（含空格）搬到 dx/dy 或 tx/ty 指定的位置，源区域改回当前背景色；copy_region 同样搬运但保留源区域。两组寻址只能给一组，源端点或目标越界整次拒绝。draw_pixels 与 flood_fill 可用 - 清除为空格（不是 H2 白豆）；background 可选 white（默认）或 empty；background_color 可选，用色表颜色铺满并记为当前背景色。list_colors 只在需要查色时调用。颜色只用当前模式的中文名或 MARD 色号。save_image 的 output 可选 pixel（默认 8 倍 PNG）、pattern（拼豆图纸）或 both；不覆盖已有文件。",
+                "PixelDraw：用强约束像素指令绘图，不要直接文生图。尽量使用像素绘制；其他图元仅用于大面积绘制。多笔绘制请一次调用 draw_batch（ops 有序数组，原子执行，只回最终预览）；单笔可用 draw_line / draw_rect / draw_triangle / draw_circle / draw_ellipse / draw_diamond / draw_curve / flood_fill / fill_background / draw_pixels / move_region / copy_region。禁止并行调用多个绘制工具，会打乱顺序。流程：create_canvas(width, height, palette?, background?, background_color?) 建图并锁定色表 → draw_batch 或单笔工具作画 → 看 8 倍预览继续修改调整（画错可用 undo 撤回）→ save_image 保存。矩形、三角形、圆、椭圆、菱形用 fill=true|false 区分填充/描边；直线、曲线与描边可用 brush=1|2|4|8 控制线宽（从落点向右下扩展 N×N，与 draw_pixels 足迹一致）。圆用左上角 (x,y) 与直径 diameter，椭圆用左上角 (x,y)、宽 width 与高 height（均为 ≥1 的整数，超过 512 按 512；锚点越界报错，右侧和下方裁剪；旧的 cx/cy/radius/rx/ry 会报错）。像素菱形 draw_diamond 用中心格 (cx,cy) 与菱形半轴 rx、ry（宽高为 2*rx+1 与 2*ry+1，总是奇数；超过 255 按 255；不是左上角锚定，也不是已废止的椭圆 rx/ry）。中心格必须在图纸内，越过边缘的部分裁剪。draw_curve 的 points 为 [x,y] 列表：2 点直线、3 点二次贝塞尔、4 点三次贝塞尔、≥5 点过点平滑样条。fill_background 用一种颜色覆盖整张图纸的每一个格子，并把当前背景色改为该颜色。move_region 把矩形区域（含空格）搬到 dx/dy 或 tx/ty 指定的位置，源区域改回当前背景色；copy_region 同样搬运但保留源区域。两组寻址只能给一组，源端点或目标越界整次拒绝。draw_pixels 与 flood_fill 可用 - 清除为空格（不是 H2 白豆）；background 可选 white（默认）或 empty；background_color 可选，用色表颜色铺满并记为当前背景色。list_colors 只在需要查色时调用。颜色只用当前模式的中文名或 MARD 色号。save_image 的 output 可选 pixel（默认 8 倍 PNG）、pattern（拼豆图纸）或 both；不覆盖已有文件。",
             )
     }
 }
@@ -979,6 +1032,18 @@ fn apply_draw_op(canvas: &mut Canvas, op: &DrawOp) -> Result<usize, CanvasError>
         } => {
             let brush = BrushSize::parse(*brush)?;
             canvas.paint_ellipse(*x, *y, *width, *height, color, *fill, brush)
+        }
+        DrawOp::Diamond {
+            cx,
+            cy,
+            rx,
+            ry,
+            color,
+            fill,
+            brush,
+        } => {
+            let brush = BrushSize::parse(*brush)?;
+            canvas.paint_diamond(*cx, *cy, *rx, *ry, color, *fill, brush)
         }
         DrawOp::Curve {
             points,
@@ -1360,6 +1425,63 @@ mod tests {
                 x: 1,
                 y: 2,
                 diameter: 8,
+                fill: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn diamond_rejects_unknown_fields_and_keeps_half_axes() {
+        let diamond: DrawDiamondRequest = serde_json::from_str(
+            r#"{"cx":3,"cy":4,"rx":2,"ry":5,"color":"纯黑","fill":true,"brush":2}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                diamond.cx,
+                diamond.cy,
+                diamond.rx,
+                diamond.ry,
+                diamond.brush
+            ),
+            (3, 4, 2, 5, Some(2))
+        );
+        for json in [
+            r#"{"cx":1,"cy":1,"rx":2,"ry":2,"color":"纯黑","fill":true,"x":0}"#,
+            r#"{"cx":1,"cy":1,"rx":2,"ry":2,"color":"纯黑","fill":true,"y":0}"#,
+            r#"{"cx":1,"cy":1,"rx":2,"ry":2,"color":"纯黑","fill":true,"width":5}"#,
+            r#"{"cx":1,"cy":1,"rx":2,"ry":2,"color":"纯黑","fill":true,"height":5}"#,
+            r#"{"cx":1,"cy":1,"rx":2,"ry":2,"color":"纯黑","fill":true,"diameter":5}"#,
+            r#"{"cx":1,"cy":1,"rx":2,"ry":2,"color":"纯黑","fill":true,"radius":2}"#,
+            r#"{"x":0,"y":0,"width":5,"height":5,"color":"纯黑","fill":true}"#,
+            r#"{"cx":1,"cy":1,"color":"纯黑","fill":true}"#,
+            r#"{"cx":1,"cy":1,"rx":-1,"ry":2,"color":"纯黑","fill":true}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<DrawDiamondRequest>(json).is_err(),
+                "{json}"
+            );
+        }
+        assert!(serde_json::from_str::<DrawOp>(
+            r#"{"type":"diamond","cx":1,"cy":1,"rx":2,"ry":2,"color":"纯黑","fill":true,"width":4}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<DrawOp>(
+            r#"{"type":"diamond","cx":1,"cy":1,"rx":2,"ry":2,"color":"纯黑","fill":true,"radius":1}"#
+        )
+        .is_err());
+        let op: DrawOp = serde_json::from_str(
+            r#"{"type":"diamond","cx":4,"cy":5,"rx":0,"ry":3,"color":"纯黑","fill":false}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            op,
+            DrawOp::Diamond {
+                cx: 4,
+                cy: 5,
+                rx: 0,
+                ry: 3,
                 fill: false,
                 ..
             }
@@ -1849,6 +1971,177 @@ mod tests {
                 .unwrap(),
             blank
         );
+    }
+
+    #[tokio::test]
+    async fn diamond_is_one_undo_and_bad_batch_is_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = PixelDraw::new(dir.path().to_path_buf());
+        let missing = server
+            .draw_diamond(Parameters(DrawDiamondRequest {
+                cx: 1,
+                cy: 1,
+                rx: 1,
+                ry: 1,
+                color: "纯黑".into(),
+                fill: true,
+                brush: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(missing.is_error, Some(true));
+        assert!(
+            missing.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("create_canvas")
+        );
+
+        server
+            .create_canvas(Parameters(CreateCanvasRequest {
+                background: Background::White,
+                background_color: None,
+                width: 16,
+                height: 16,
+                palette: Some("24".into()),
+            }))
+            .await
+            .unwrap();
+        let drawn = server
+            .draw_diamond(Parameters(DrawDiamondRequest {
+                cx: 6,
+                cy: 6,
+                rx: 3,
+                ry: 2,
+                color: "纯黑".into(),
+                fill: true,
+                brush: None,
+            }))
+            .await
+            .unwrap();
+        assert_ne!(drawn.is_error, Some(true));
+        assert_eq!(server.canvas.lock().await.as_ref().unwrap().undo_len(), 1);
+        let before = server
+            .canvas
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .encode_png_8x()
+            .unwrap();
+        let before_codes = server
+            .canvas
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .codes()
+            .to_vec();
+
+        let bad = server
+            .draw_batch(Parameters(DrawBatchRequest {
+                ops: vec![
+                    DrawOp::Line {
+                        x0: 0,
+                        y0: 0,
+                        x1: 4,
+                        y1: 0,
+                        color: "明黄".into(),
+                        brush: Some(1),
+                    },
+                    DrawOp::Diamond {
+                        cx: 16,
+                        cy: 0,
+                        rx: 2,
+                        ry: 2,
+                        color: "纯黑".into(),
+                        fill: true,
+                        brush: None,
+                    },
+                ],
+            }))
+            .await
+            .unwrap();
+        assert_eq!(bad.is_error, Some(true));
+        assert!(
+            bad.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("整批已拒绝")
+        );
+        let unknown = server
+            .draw_diamond(Parameters(DrawDiamondRequest {
+                cx: 1,
+                cy: 1,
+                rx: 2,
+                ry: 2,
+                color: "彩虹".into(),
+                fill: false,
+                brush: Some(4),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(unknown.is_error, Some(true));
+        let after = server
+            .canvas
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .encode_png_8x()
+            .unwrap();
+        assert_eq!(before, after);
+        assert_eq!(
+            server.canvas.lock().await.as_ref().unwrap().codes(),
+            before_codes
+        );
+        assert_eq!(server.canvas.lock().await.as_ref().unwrap().undo_len(), 1);
+
+        let batched = server
+            .draw_batch(Parameters(DrawBatchRequest {
+                ops: vec![
+                    DrawOp::Diamond {
+                        cx: 2,
+                        cy: 2,
+                        rx: 0,
+                        ry: 2,
+                        color: "中国红".into(),
+                        fill: true,
+                        brush: Some(8),
+                    },
+                    DrawOp::Diamond {
+                        cx: 12,
+                        cy: 4,
+                        rx: 2,
+                        ry: 0,
+                        color: "明黄".into(),
+                        fill: false,
+                        brush: None,
+                    },
+                ],
+            }))
+            .await
+            .unwrap();
+        assert_ne!(batched.is_error, Some(true));
+        assert_eq!(server.canvas.lock().await.as_ref().unwrap().undo_len(), 2);
+        server
+            .undo(Parameters(UndoRequest { steps: Some(1) }))
+            .await
+            .unwrap();
+        assert_eq!(
+            server
+                .canvas
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .encode_png_8x()
+                .unwrap(),
+            before
+        );
+        assert_eq!(server.canvas.lock().await.as_ref().unwrap().undo_len(), 1);
     }
 
     #[tokio::test]

@@ -153,6 +153,7 @@ fn stdio_draws_and_saves_outside_the_working_directory() {
             "draw_batch",
             "draw_circle",
             "draw_curve",
+            "draw_diamond",
             "draw_ellipse",
             "draw_line",
             "draw_pixels",
@@ -684,7 +685,7 @@ fn stdio_move_region_changes_preview_and_pattern_codes() {
 
     let listed = process.request(2, "tools/list", json!({}));
     let tools = listed["tools"].as_array().expect("tools array");
-    assert_eq!(tools.len(), 16);
+    assert_eq!(tools.len(), 17);
     let move_tool = tools
         .iter()
         .find(|tool| tool["name"] == "move_region")
@@ -1026,4 +1027,183 @@ fn stdio_circle_and_ellipse_use_diameter() {
     let thin_count = thin_img.pixels().filter(|pixel| pixel.0 == black).count();
     assert!(thick_count > thin_count);
     assert_eq!(cell(&thin_img, 3, 3), white);
+}
+
+#[test]
+fn stdio_diamond_uses_center_and_half_axes() {
+    let output = tempfile::tempdir().unwrap();
+    let mut process = Process::spawn(
+        output.path(),
+        &[
+            std::ffi::OsStr::new("--output-dir"),
+            output.path().as_os_str(),
+        ],
+    );
+    process.request(
+        1,
+        "initialize",
+        json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "diamond-test", "version": "1"}
+        }),
+    );
+    process.send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+
+    let listed = process.request(2, "tools/list", json!({}));
+    let tools = listed["tools"].as_array().expect("tools");
+    let names: Vec<_> = tools
+        .iter()
+        .map(|tool| tool["name"].as_str().expect("tool name"))
+        .collect();
+    assert!(names.contains(&"draw_diamond"), "{names:?}");
+    let diamond = tools
+        .iter()
+        .find(|tool| tool["name"] == "draw_diamond")
+        .expect("draw_diamond");
+    let desc = diamond["description"].as_str().unwrap();
+    assert!(desc.contains("中心格"), "{desc}");
+    assert!(desc.contains("菱形半轴"), "{desc}");
+    assert!(desc.contains("2*rx+1"), "{desc}");
+    assert!(desc.contains("2*ry+1"), "{desc}");
+    assert!(desc.contains("奇数"), "{desc}");
+    assert!(desc.contains("1 格轮廓"), "{desc}");
+    assert!(desc.contains("不是左上角"), "{desc}");
+    assert!(desc.contains("已废止的椭圆"), "{desc}");
+    assert!(desc.contains("必须在图纸内"), "{desc}");
+    let props = &diamond["inputSchema"]["properties"];
+    for name in ["cx", "cy", "rx", "ry", "color", "fill", "brush"] {
+        assert!(props[name].is_object(), "{name} missing from {props}");
+    }
+    for retired in ["x", "y", "width", "height", "diameter", "radius"] {
+        assert!(props.get(retired).is_none(), "{retired} in {props}");
+    }
+    let ellipse = tools
+        .iter()
+        .find(|tool| tool["name"] == "draw_ellipse")
+        .expect("draw_ellipse");
+    let ellipse_props = &ellipse["inputSchema"]["properties"];
+    for retired in ["cx", "cy", "rx", "ry"] {
+        assert!(
+            ellipse_props.get(retired).is_none(),
+            "ellipse still has {retired}"
+        );
+    }
+
+    process.request(
+        3,
+        "tools/call",
+        json!({"name":"create_canvas","arguments":{"width":8,"height":8,"palette":"24"}}),
+    );
+    let created = process.request(
+        4,
+        "tools/call",
+        json!({"name":"save_image","arguments":{"filename":"diamond-blank","output":"pixel"}}),
+    );
+    let blank_png = response_png(&created);
+
+    let drawn = process.request(
+        5,
+        "tools/call",
+        json!({"name":"draw_diamond","arguments":{"cx":3,"cy":3,"rx":2,"ry":2,"color":"H7","fill":true}}),
+    );
+    let img = image::load_from_memory(&response_png(&drawn))
+        .unwrap()
+        .to_rgb8();
+    let white = [254, 255, 255];
+    let black = [0, 0, 0];
+    for x in 0..8u32 {
+        for y in 0..8u32 {
+            let inside = (x as i32 - 3).abs() + (y as i32 - 3).abs() <= 2;
+            let expect = if inside { black } else { white };
+            assert_eq!(cell(&img, x, y), expect, "{x},{y}");
+        }
+    }
+    assert_eq!(cell(&img, 3, 3), black);
+    assert_eq!(cell(&img, 5, 5), white);
+    assert_eq!(cell(&img, 1, 1), white);
+
+    process.request(6, "tools/call", json!({"name":"undo","arguments":{}}));
+    let bar = process.request(
+        7,
+        "tools/call",
+        json!({"name":"draw_diamond","arguments":{"cx":1,"cy":3,"rx":0,"ry":2,"color":"F5","fill":true}}),
+    );
+    let bar_img = image::load_from_memory(&response_png(&bar))
+        .unwrap()
+        .to_rgb8();
+    let red = [0xE7, 0x00, 0x2F];
+    for y in 1..=5u32 {
+        assert_eq!(cell(&bar_img, 1, y), red, "vertical bar y={y}");
+    }
+    assert_eq!(cell(&bar_img, 0, 3), white);
+    assert_eq!(cell(&bar_img, 2, 3), white);
+
+    process.request(8, "tools/call", json!({"name":"undo","arguments":{}}));
+    let cleared = process.request(
+        9,
+        "tools/call",
+        json!({"name":"save_image","arguments":{"filename":"diamond-cleared","output":"pixel"}}),
+    );
+    assert_eq!(response_png(&cleared), blank_png);
+
+    let batch = process.request(
+        10,
+        "tools/call",
+        json!({
+            "name": "draw_batch",
+            "arguments": {"ops": [
+                {"type":"diamond","cx":4,"cy":2,"rx":1,"ry":0,"color":"H7","fill":false},
+                {"type":"line","x0":0,"y0":7,"x1":2,"y1":7,"color":"A4"}
+            ]}
+        }),
+    );
+    assert!(!tool_failed(&batch), "{batch}");
+    let batch_png = response_png(&batch);
+    let batch_img = image::load_from_memory(&batch_png).unwrap().to_rgb8();
+    // ry = 0 is a horizontal bar of length 2*rx+1 centered on (4, 2).
+    for x in 3..=5u32 {
+        assert_eq!(cell(&batch_img, x, 2), black, "horizontal bar x={x}");
+    }
+    assert_eq!(cell(&batch_img, 4, 1), white);
+    assert_eq!(cell(&batch_img, 4, 3), white);
+    let yellow = [0xFB, 0xED, 0x56];
+    assert_eq!(cell(&batch_img, 0, 7), yellow);
+
+    let bad_batch = process.exchange(
+        11,
+        "tools/call",
+        json!({
+            "name": "draw_batch",
+            "arguments": {"ops": [
+                {"type":"line","x0":0,"y0":0,"x1":3,"y1":0,"color":"A4"},
+                {"type":"diamond","cx":8,"cy":0,"rx":2,"ry":2,"color":"H7","fill":true}
+            ]}
+        }),
+    );
+    assert!(tool_failed(&bad_batch), "{bad_batch}");
+    let unknown_field = process.exchange(
+        12,
+        "tools/call",
+        json!({
+            "name": "draw_batch",
+            "arguments": {"ops": [
+                {"type":"diamond","cx":1,"cy":1,"rx":2,"ry":2,"color":"H7","fill":true,"width":5,"height":5}
+            ]}
+        }),
+    );
+    assert!(tool_failed(&unknown_field), "{unknown_field}");
+    let direct = process.exchange(
+        13,
+        "tools/call",
+        json!({"name":"draw_diamond","arguments":{"cx":3,"cy":3,"rx":2,"ry":1,"color":"H7","fill":true,"x":0,"diameter":4}}),
+    );
+    assert!(tool_failed(&direct), "{direct}");
+
+    let still = process.request(
+        14,
+        "tools/call",
+        json!({"name":"save_image","arguments":{"filename":"diamond-still","output":"pixel"}}),
+    );
+    assert_eq!(response_png(&still), batch_png);
 }
