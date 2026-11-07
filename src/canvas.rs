@@ -2,6 +2,7 @@ use std::io::Cursor;
 
 use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba, imageops::FilterType};
 
+use crate::motif;
 use crate::palette::{self, Color, PaletteMode};
 use crate::shapes;
 
@@ -444,6 +445,7 @@ impl Canvas {
     /// Paint pre-rasterized shape points with a brush stamp on each point.
     /// Coordinates may fall outside the canvas; those stamps are clipped.
     /// Records one undo step only when at least one cell is written.
+    /// `-` is not a shape color; motif placement accepts it in [`Self::paint_motif`].
     pub fn paint_shape_points(
         &mut self,
         points: &[(i32, i32)],
@@ -455,20 +457,84 @@ impl Canvas {
                 color: color.to_string(),
                 mode: self.mode,
             })?;
+        Ok(self.stamp_points(points, Some(color), brush.size()))
+    }
+
+    /// Stamp `stamp`×`stamp` blocks on pre-rasterized points.
+    ///
+    /// `None` clears those cells to empty (not an H2 bead). Blocks that fall
+    /// outside the canvas are clipped. One undo step is recorded only when at
+    /// least one cell is written. The remembered background color is unchanged.
+    /// The returned count is distinct cells, not `points × stamp²`.
+    fn stamp_points(&mut self, points: &[(i32, i32)], color: Option<&Color>, stamp: u32) -> usize {
         if points.is_empty() {
-            return Ok(0);
+            return 0;
         }
         self.push_undo();
-        let n = brush.size();
         let mut touched = vec![false; self.pixels.len()];
         let mut written = 0;
         for &(x, y) in points {
-            written += self.stamp_block(x, y, Some(color), n, &mut touched);
+            written += self.stamp_block(x, y, color, stamp, &mut touched);
         }
         if written == 0 {
             self.discard_undo();
         }
-        Ok(written)
+        written
+    }
+
+    /// Place one embedded motif at the top-left `(x, y)` of its bounding box.
+    ///
+    /// `scale` defaults to 1 and must be an integer from 1 to 8. Each occupied
+    /// cell becomes a solid `scale`×`scale` block; gaps in the bitmap are not
+    /// painted. The anchor must lie on the canvas. Blocks past the edge are
+    /// clipped. `color` of `-` clears cells. An unknown name, a bad dice face,
+    /// a stray face, a bad scale, an anchor outside the canvas, or an unknown
+    /// color rejects the call before any cell is written.
+    pub fn paint_motif(
+        &mut self,
+        name: &str,
+        x: u32,
+        y: u32,
+        color: &str,
+        scale: Option<u32>,
+        face: Option<u32>,
+    ) -> Result<usize, CanvasError> {
+        let pattern = motif::motif_points(name, face)
+            .map_err(|message| CanvasError::InvalidOp { message })?;
+        let scale = match scale {
+            None => 1,
+            Some(scale) if (1..=8).contains(&scale) => scale,
+            Some(scale) => {
+                return Err(CanvasError::InvalidOp {
+                    message: format!("放大倍数 scale 必须是 1 到 8 的整数，当前为 {scale}。"),
+                });
+            }
+        };
+        self.require_point(x, y)?;
+        let paint = if color.trim() == "-" {
+            None
+        } else {
+            Some(palette::resolve_color(self.mode, color).ok_or_else(|| {
+                CanvasError::UnknownColor {
+                    color: color.to_string(),
+                    mode: self.mode,
+                }
+            })?)
+        };
+        let origin_x = i32::try_from(x).expect("canvas x fits i32");
+        let origin_y = i32::try_from(y).expect("canvas y fits i32");
+        let step = i32::try_from(scale).expect("motif scale fits i32");
+        let points: Vec<(i32, i32)> = pattern
+            .cells
+            .iter()
+            .map(|&(dx, dy)| {
+                (
+                    origin_x + i32::from(dx) * step,
+                    origin_y + i32::from(dy) * step,
+                )
+            })
+            .collect();
+        Ok(self.stamp_points(&points, paint, scale))
     }
 
     pub fn paint_line(
@@ -2910,5 +2976,293 @@ mod tests {
         assert_eq!(empty_source.codes(), &[None, None, None, None]);
         assert_eq!(empty_source.background_code(), None);
         assert_eq!(empty_source.undo_len(), 2);
+    }
+
+    fn paint_cells(canvas: &mut Canvas, cells: &[(u32, u32)], color: &str) {
+        let updates: Vec<_> = cells.iter().map(|&(x, y)| stamp(x, y, color)).collect();
+        canvas.paint(&updates, BrushSize::One).unwrap();
+    }
+
+    fn motif_block(name: &str, face: Option<u32>, x: u32, y: u32, scale: u32) -> Vec<(u32, u32)> {
+        let pattern = motif::motif_points(name, face).unwrap();
+        let mut cells = Vec::new();
+        for &(dx, dy) in pattern.cells {
+            for sy in 0..scale {
+                for sx in 0..scale {
+                    cells.push((
+                        x + u32::from(dx) * scale + sx,
+                        y + u32::from(dy) * scale + sy,
+                    ));
+                }
+            }
+        }
+        cells
+    }
+
+    #[test]
+    fn motif_matches_pixels_and_records_one_undo() {
+        let mut canvas = Canvas::new(16, 12, PaletteMode::Colors24).unwrap();
+        let before = canvas.clone();
+        let background = canvas.background_code();
+        let err = canvas
+            .paint_motif("十字", 2, 3, "彩虹", None, None)
+            .unwrap_err();
+        assert!(matches!(err, CanvasError::UnknownColor { .. }));
+        assert_eq!(canvas.pixels, before.pixels);
+        assert_eq!(canvas.codes(), before.codes());
+        assert_eq!(canvas.undo_len(), 0);
+        assert_eq!(canvas.background_code(), background);
+
+        for (name, scale, face) in [
+            ("没有这种", Some(1), None),
+            ("骰子面", None, None),
+            ("骰子面", None, Some(0)),
+            ("骰子面", None, Some(7)),
+            ("十字", None, Some(1)),
+            ("十字", Some(0), None),
+            ("十字", Some(9), None),
+        ] {
+            let err = canvas.paint_motif(name, 1, 1, "纯黑", scale, face);
+            assert!(err.is_err(), "{name} scale={scale:?} face={face:?}");
+            assert_eq!(canvas.pixels, before.pixels);
+            assert_eq!(canvas.undo_len(), 0);
+            assert_eq!(canvas.background_code(), background);
+        }
+        let oob = canvas
+            .paint_motif("十字", 16, 0, "纯黑", None, None)
+            .unwrap_err();
+        assert!(matches!(oob, CanvasError::OutOfBounds { x: 16, y: 0, .. }));
+        assert_eq!(canvas.undo_len(), 0);
+
+        let written = canvas
+            .paint_motif("十字", 2, 3, "纯黑", None, None)
+            .unwrap();
+        assert_eq!(written, 5);
+        assert_eq!(canvas.undo_len(), 1);
+        assert_eq!(canvas.background_code(), background);
+        let cells = cells_with(&canvas, black());
+        let expected: HashSet<(u32, u32)> =
+            motif_block("十字", None, 2, 3, 1).into_iter().collect();
+        assert_eq!(cells, expected);
+        // Gaps in the 3×3 box stay background beads.
+        assert_eq!(cell(&canvas, 2, 3), Some("H2"));
+        assert_eq!(cell(&canvas, 3, 3), Some("H7"));
+
+        let mut via_pixels = Canvas::new(16, 12, PaletteMode::Colors24).unwrap();
+        paint_cells(
+            &mut via_pixels,
+            &expected.iter().copied().collect::<Vec<_>>(),
+            "H7",
+        );
+        assert_eq!(canvas.codes(), via_pixels.codes());
+        assert_eq!(canvas.pixels, via_pixels.pixels);
+        assert_eq!(
+            canvas.encode_png_8x().unwrap(),
+            via_pixels.encode_png_8x().unwrap()
+        );
+        assert_eq!(
+            crate::pattern::counts(&canvas),
+            crate::pattern::counts(&via_pixels)
+        );
+
+        let scaled = canvas
+            .paint_motif("四点", 1, 1, "正红", Some(2), None)
+            .unwrap();
+        assert_eq!(scaled, 16);
+        assert_eq!(canvas.undo_len(), 2);
+        let red = palette::resolve_color(PaletteMode::Colors24, "正红").unwrap();
+        let red_cells = cells_with(&canvas, red.rgb);
+        let expected_red: HashSet<(u32, u32)> =
+            motif_block("四点", None, 1, 1, 2).into_iter().collect();
+        assert_eq!(red_cells, expected_red);
+        let mut via_scale = Canvas::new(16, 12, PaletteMode::Colors24).unwrap();
+        paint_cells(
+            &mut via_scale,
+            &expected_red.iter().copied().collect::<Vec<_>>(),
+            "F2",
+        );
+        // The cross underneath is still there; compare only the new red cells.
+        for &(x, y) in &expected_red {
+            assert_eq!(cell(&canvas, x, y), Some("F2"));
+            assert_eq!(cell(&via_scale, x, y), Some("F2"));
+        }
+        // A gap of the unscaled 四点, expanded, stays the earlier color.
+        assert_eq!(cell(&canvas, 1, 3), Some("H2"));
+
+        canvas.undo(1).unwrap();
+        assert_eq!(canvas.undo_len(), 1);
+        assert_eq!(cells_with(&canvas, black()), cells);
+        assert!(cells_with(&canvas, red.rgb).is_empty());
+        canvas.undo(1).unwrap();
+        assert_eq!(canvas.pixels, before.pixels);
+        assert_eq!(canvas.undo_len(), 0);
+    }
+
+    #[test]
+    fn motif_clips_occupied_cells_and_ignores_gaps() {
+        let mut canvas = Canvas::new(4, 4, PaletteMode::Colors24).unwrap();
+        canvas
+            .paint_rect(0, 0, 3, 3, "正红", true, BrushSize::One)
+            .unwrap();
+        let written = canvas
+            .paint_motif("十字", 2, 2, "纯黑", Some(2), None)
+            .unwrap();
+        // Relative occupied cells of 十字 at scale 2 from (2, 2):
+        // (1,0) -> (4,2) out, (0,1) -> (2,4) out, (1,1) -> (4,4) out,
+        // (2,1) -> (6,4) out, (1,2) -> (4,6) out. Nothing lands.
+        assert_eq!(written, 0);
+        assert_eq!(canvas.undo_len(), 1, "the red fill is the only step");
+        assert!(canvas.codes().iter().all(|code| *code == Some("F2")));
+
+        let written = canvas
+            .paint_motif("斜线-短", 3, 3, "纯黑", Some(2), None)
+            .unwrap();
+        // (0,0) block starts at (3,3): only (3,3) is on the canvas.
+        // (1,1) block starts at (5,5) and is clipped entirely.
+        assert_eq!(written, 1);
+        assert_eq!(cell(&canvas, 3, 3), Some("H7"));
+        assert_eq!(cell(&canvas, 2, 3), Some("F2"));
+        assert_eq!(cell(&canvas, 3, 2), Some("F2"));
+        assert_eq!(canvas.background_code(), Some("H2"));
+
+        let mut edge = Canvas::new(8, 8, PaletteMode::Colors221).unwrap();
+        let written = edge
+            .paint_motif("箭头-右", 6, 6, "纯黑", None, None)
+            .unwrap();
+        let on_canvas: HashSet<(u32, u32)> = motif_block("箭头-右", None, 6, 6, 1)
+            .into_iter()
+            .filter(|&(x, y)| x < 8 && y < 8)
+            .collect();
+        assert!(
+            motif_block("箭头-右", None, 6, 6, 1)
+                .iter()
+                .any(|&(x, y)| x >= 8 || y >= 8)
+        );
+        assert_eq!(cells_with(&edge, black()), on_canvas);
+        assert_eq!(written, on_canvas.len());
+        assert_eq!(edge.undo_len(), 1);
+    }
+
+    #[test]
+    fn motif_clear_is_not_h2_and_background_stays() {
+        let mut cleared = Canvas::new(5, 5, PaletteMode::Colors24).unwrap();
+        let before_counts = crate::pattern::counts(&cleared);
+        assert_eq!(before_counts["H2"], 25);
+        let written = cleared.paint_motif("十字", 1, 1, "-", None, None).unwrap();
+        assert_eq!(written, 5);
+        assert_eq!(cleared.background_code(), Some("H2"));
+        assert_eq!(cleared.undo_len(), 1);
+        for (x, y) in motif_block("十字", None, 1, 1, 1) {
+            assert_eq!(cell(&cleared, x, y), None, "({x},{y}) should be empty");
+        }
+        assert_eq!(
+            cell(&cleared, 1, 1),
+            Some("H2"),
+            "the gap stays a white bead"
+        );
+        let counts = crate::pattern::counts(&cleared);
+        assert_eq!(counts["H2"], 20);
+        assert_eq!(counts.len(), 1);
+        let png = image::load_from_memory(&cleared.encode_png_8x().unwrap())
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(png.get_pixel(8, 8).0[3], 255);
+        assert_eq!(png.get_pixel(16, 8).0[3], 0);
+
+        let mut beads = Canvas::new_empty(5, 5, PaletteMode::Colors24).unwrap();
+        beads
+            .paint_motif("十字", 1, 1, "H2", Some(1), None)
+            .unwrap();
+        assert_eq!(beads.background_code(), None);
+        for (x, y) in motif_block("十字", None, 1, 1, 1) {
+            assert_eq!(cell(&beads, x, y), Some("H2"));
+        }
+        assert_eq!(cell(&beads, 1, 1), None);
+        assert_eq!(crate::pattern::counts(&beads)["H2"], 5);
+        let bead_png = image::load_from_memory(&beads.encode_png_8x().unwrap())
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(bead_png.get_pixel(16, 8).0, [254, 255, 255, 255]);
+        assert_eq!(bead_png.get_pixel(8, 8).0[3], 0);
+        assert_ne!(cleared.codes(), beads.codes());
+
+        let mut colored = Canvas::new_with_color(6, 3, PaletteMode::Colors144, "正红").unwrap();
+        colored
+            .paint_motif("品字-缺左上", 0, 0, "纯黑", None, None)
+            .unwrap();
+        assert_eq!(colored.background_code(), Some("F2"));
+        colored
+            .move_region(0, 0, 1, 1, Some(3), Some(0), None, None)
+            .unwrap();
+        assert_eq!(cell(&colored, 0, 0), Some("F2"));
+        assert_eq!(cell(&colored, 1, 0), Some("F2"));
+        assert_eq!(cell(&colored, 0, 1), Some("F2"));
+        assert_eq!(cell(&colored, 3, 0), Some("F2"));
+        assert_eq!(cell(&colored, 4, 0), Some("H7"));
+        assert_eq!(cell(&colored, 3, 1), Some("H7"));
+        assert_eq!(cell(&colored, 4, 1), Some("H7"));
+        assert_eq!(colored.background_code(), Some("F2"));
+
+        let mut empty_bg = Canvas::new_empty(3, 2, PaletteMode::Colors24).unwrap();
+        empty_bg
+            .paint_motif("斜线-短", 0, 0, "纯黑", None, None)
+            .unwrap();
+        assert_eq!(empty_bg.background_code(), None);
+        assert_eq!(cell(&empty_bg, 0, 0), Some("H7"));
+        assert_eq!(cell(&empty_bg, 1, 1), Some("H7"));
+        empty_bg
+            .move_region(0, 0, 0, 0, Some(2), Some(0), None, None)
+            .unwrap();
+        assert_eq!(cell(&empty_bg, 0, 0), None);
+        assert_eq!(cell(&empty_bg, 2, 0), Some("H7"));
+        assert_eq!(cell(&empty_bg, 1, 1), Some("H7"));
+        assert_eq!(empty_bg.background_code(), None);
+    }
+
+    #[test]
+    fn motif_batch_is_one_undo_and_scale_counts_unique_cells() {
+        let mut canvas = Canvas::new(16, 16, PaletteMode::Colors24).unwrap();
+        canvas.begin_batch();
+        let cross = canvas
+            .paint_motif("十字", 0, 0, "纯黑", Some(3), None)
+            .unwrap();
+        assert_eq!(cross, 5 * 9);
+        canvas
+            .paint_line(0, 15, 4, 15, "明黄", BrushSize::One)
+            .unwrap();
+        canvas.end_batch();
+        assert_eq!(canvas.undo_len(), 1);
+        assert_eq!(canvas.background_code(), Some("H2"));
+        canvas.undo(1).unwrap();
+        assert!(
+            canvas
+                .pixels
+                .iter()
+                .all(|pixel| *pixel == PaletteMode::Colors24.white_rgb())
+        );
+        assert_eq!(canvas.undo_len(), 0);
+
+        canvas.begin_batch();
+        let none = canvas
+            .paint_motif("十字", 15, 15, "纯黑", None, None)
+            .unwrap();
+        assert_eq!(none, 0);
+        canvas.end_batch();
+        assert_eq!(canvas.undo_len(), 0);
+        assert!(
+            canvas
+                .pixels
+                .iter()
+                .all(|pixel| *pixel == PaletteMode::Colors24.white_rgb())
+        );
+
+        let dice = canvas
+            .paint_motif("骰子面", 0, 0, "中国红", None, Some(5))
+            .unwrap();
+        assert_eq!(dice, 5);
+        assert_eq!(cell(&canvas, 0, 0), Some("F5"));
+        assert_eq!(cell(&canvas, 1, 0), Some("H2"));
+        assert_eq!(cell(&canvas, 1, 1), Some("F5"));
+        assert_eq!(canvas.undo_len(), 1);
     }
 }

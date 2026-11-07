@@ -90,20 +90,40 @@ impl Drop for Process {
     }
 }
 
-fn response_png(result: &Value) -> Vec<u8> {
+fn tool_png(result: &Value) -> Vec<u8> {
     assert_ne!(result["isError"], true, "{result}");
-    let content = result["content"].as_array().expect("tool content");
-    assert!(content.iter().any(|block| block["type"] == "text"));
-    let images: Vec<_> = content
+    let images: Vec<_> = result["content"]
+        .as_array()
+        .expect("tool content")
         .iter()
         .filter(|block| block["type"] == "image")
         .collect();
     assert_eq!(images.len(), 1, "{result}");
-    assert_eq!(images[0]["mimeType"], "image/png");
     let png = STANDARD
         .decode(images[0]["data"].as_str().expect("base64 image"))
         .expect("valid base64");
     assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+    png
+}
+
+fn response_png(result: &Value) -> Vec<u8> {
+    assert!(
+        result["content"]
+            .as_array()
+            .expect("tool content")
+            .iter()
+            .any(|block| block["type"] == "text")
+    );
+    assert_eq!(
+        result["content"]
+            .as_array()
+            .expect("tool content")
+            .iter()
+            .find(|block| block["type"] == "image")
+            .expect("image")["mimeType"],
+        "image/png"
+    );
+    let png = tool_png(result);
     let image =
         image::load_from_memory_with_format(&png, image::ImageFormat::Png).expect("valid PNG");
     assert_eq!((image.width(), image.height()), (64, 64));
@@ -156,6 +176,7 @@ fn stdio_draws_and_saves_outside_the_working_directory() {
             "draw_diamond",
             "draw_ellipse",
             "draw_line",
+            "draw_motif",
             "draw_pixels",
             "draw_rect",
             "draw_triangle",
@@ -685,7 +706,7 @@ fn stdio_move_region_changes_preview_and_pattern_codes() {
 
     let listed = process.request(2, "tools/list", json!({}));
     let tools = listed["tools"].as_array().expect("tools array");
-    assert_eq!(tools.len(), 17);
+    assert_eq!(tools.len(), 18);
     let move_tool = tools
         .iter()
         .find(|tool| tool["name"] == "move_region")
@@ -1206,4 +1227,289 @@ fn stdio_diamond_uses_center_and_half_axes() {
         json!({"name":"save_image","arguments":{"filename":"diamond-still","output":"pixel"}}),
     );
     assert_eq!(response_png(&still), batch_png);
+}
+
+#[test]
+fn stdio_motif_places_named_patterns() {
+    let output = tempfile::tempdir().unwrap();
+    let mut process = Process::spawn(
+        output.path(),
+        &[
+            std::ffi::OsStr::new("--output-dir"),
+            output.path().as_os_str(),
+        ],
+    );
+    let initialized = process.request(
+        1,
+        "initialize",
+        json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "motif-test", "version": "1"}
+        }),
+    );
+    let instructions = initialized["instructions"].as_str().unwrap();
+    assert!(instructions.contains("draw_motif"), "{instructions}");
+    assert!(instructions.contains("十字（3×3、5 格）"), "{instructions}");
+    assert!(instructions.contains("face=1 为 1 格"), "{instructions}");
+    assert!(instructions.contains("face=6 为 6 格"), "{instructions}");
+    assert!(instructions.contains(".#../####/..#."), "{instructions}");
+    process.send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+
+    let listed = process.request(2, "tools/list", json!({}));
+    let tools = listed["tools"].as_array().expect("tools");
+    let names: Vec<_> = tools
+        .iter()
+        .map(|tool| tool["name"].as_str().expect("tool name"))
+        .collect();
+    assert!(names.contains(&"draw_motif"), "{names:?}");
+    let motif = tools
+        .iter()
+        .find(|tool| tool["name"] == "draw_motif")
+        .expect("draw_motif");
+    let desc = motif["description"].as_str().unwrap();
+    for fragment in [
+        "十字（3×3、5 格）",
+        "叉（3×3、5 格）",
+        "品字-缺左上（2×2、3 格）",
+        "品字-缺右上（2×2、3 格）",
+        "斜线-短（2×2、2 格）",
+        "斜线-长（3×3、3 格）",
+        "四点（3×3、4 格）",
+        "T字-下（3×3、5 格）",
+        "T字-上（3×3、5 格）",
+        "T字-右（3×3、5 格）",
+        "T字-左（3×3、5 格）",
+        "拐角-左上（2×2、3 格）",
+        "拐角-右上（2×2、3 格）",
+        "拐角-左下（2×2、3 格）",
+        "拐角-右下（2×2、3 格）",
+        "箭头-上（3×4、6 格）",
+        "箭头-下（3×4、6 格）",
+        "箭头-左（4×3、6 格）",
+        "箭头-右（4×3、6 格）",
+        "对勾（3×3、4 格）",
+        "感叹号（1×5、4 格）",
+        "四芒闪光（3×3、4 格）",
+        "五角星（5×5、13 格）",
+        "闪电（3×5、7 格）",
+        "小爱心（5×4、11 格）",
+        "水滴（3×4、7 格）",
+        "小花（5×5、13 格）",
+        "骰子面（3×3，face=1 为 1 格、face=2 为 2 格、face=3 为 3 格、face=4 为 4 格、face=5 为 5 格、face=6 为 6 格）",
+        "扑克-红心（5×4、11 格，与小爱心同一点阵）",
+        "扑克-方块（5×5、13 格）",
+        "扑克-梅花（5×5、12 格）",
+        "扑克-黑桃（5×5、13 格）",
+        ".#../####/..#.",
+        "不改成箭头-右的左右镜像",
+    ] {
+        assert!(desc.contains(fragment), "missing {fragment} in {desc}");
+    }
+    let props = &motif["inputSchema"]["properties"];
+    for name in ["name", "x", "y", "color", "scale", "face"] {
+        assert!(props[name].is_object(), "{name} missing from {props}");
+    }
+    let required = motif["inputSchema"]["required"].as_array().unwrap();
+    for name in ["name", "x", "y", "color"] {
+        assert!(required.iter().any(|item| item == name), "{required:?}");
+    }
+    assert!(
+        required
+            .iter()
+            .all(|item| item != "scale" && item != "face")
+    );
+    let batch = tools
+        .iter()
+        .find(|tool| tool["name"] == "draw_batch")
+        .expect("draw_batch");
+    assert!(
+        batch["description"].as_str().unwrap().contains("motif"),
+        "{}",
+        batch["description"]
+    );
+
+    let created = process.request(
+        3,
+        "tools/call",
+        json!({"name":"create_canvas","arguments":{"width":8,"height":8,"palette":"24"}}),
+    );
+    assert!(
+        created["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("draw_motif")
+    );
+    let blank = response_png(&created);
+    let white = [254, 255, 255];
+    let black = [0, 0, 0];
+
+    let drawn = process.request(
+        4,
+        "tools/call",
+        json!({"name":"draw_motif","arguments":{"name":"十字","x":1,"y":1,"color":"H7"}}),
+    );
+    let img = image::load_from_memory(&response_png(&drawn))
+        .unwrap()
+        .to_rgb8();
+    let cross = [(2, 1), (1, 2), (2, 2), (3, 2), (2, 3)];
+    for x in 0..8u32 {
+        for y in 0..8u32 {
+            let expect = if cross.contains(&(x, y)) {
+                black
+            } else {
+                white
+            };
+            assert_eq!(cell(&img, x, y), expect, "{x},{y}");
+        }
+    }
+
+    process.request(5, "tools/call", json!({"name":"undo","arguments":{}}));
+    let cleared = process.request(
+        6,
+        "tools/call",
+        json!({"name":"save_image","arguments":{"filename":"motif-blank","output":"pixel"}}),
+    );
+    assert_eq!(response_png(&cleared), blank);
+
+    let batch_call = process.request(
+        7,
+        "tools/call",
+        json!({
+            "name": "draw_batch",
+            "arguments": {"ops": [
+                {"type":"motif","name":"骰子面","x":0,"y":0,"color":"F5","face":5},
+                {"type":"line","x0":0,"y0":7,"x1":2,"y1":7,"color":"A4"}
+            ]}
+        }),
+    );
+    let batch_png = response_png(&batch_call);
+    let batch_img = image::load_from_memory(&batch_png).unwrap().to_rgb8();
+    let red = [0xE7, 0x00, 0x2F];
+    let yellow = [0xFB, 0xED, 0x56];
+    for (x, y) in [(0, 0), (2, 0), (1, 1), (0, 2), (2, 2)] {
+        assert_eq!(cell(&batch_img, x, y), red, "die {x},{y}");
+    }
+    assert_eq!(cell(&batch_img, 1, 0), white, "die gap");
+    assert_eq!(cell(&batch_img, 0, 7), yellow);
+
+    let cases = [
+        (
+            8u64,
+            json!({"ops":[
+                {"type":"pixels","pixels":"0 0 H7"},
+                {"type":"motif","name":"没有","x":0,"y":0,"color":"H7"}
+            ]}),
+        ),
+        (
+            9,
+            json!({"ops":[{"type":"motif","name":"骰子面","x":0,"y":0,"color":"H7"}]}),
+        ),
+        (
+            10,
+            json!({"ops":[{"type":"motif","name":"骰子面","x":0,"y":0,"color":"H7","face":0}]}),
+        ),
+        (
+            11,
+            json!({"ops":[{"type":"motif","name":"骰子面","x":0,"y":0,"color":"H7","face":7}]}),
+        ),
+        (
+            12,
+            json!({"ops":[{"type":"motif","name":"十字","x":0,"y":0,"color":"H7","face":1}]}),
+        ),
+        (
+            13,
+            json!({"ops":[{"type":"motif","name":"十字","x":0,"y":0,"color":"彩虹"}]}),
+        ),
+        (
+            14,
+            json!({"ops":[{"type":"motif","name":"十字","x":8,"y":0,"color":"H7"}]}),
+        ),
+        (
+            15,
+            json!({"ops":[{"type":"motif","name":"十字","x":0,"y":0,"color":"H7","scale":9}]}),
+        ),
+        (
+            16,
+            json!({"ops":[{"type":"motif","name":"十字","x":0,"y":0,"color":"H7","brush":1}]}),
+        ),
+    ];
+    for (id, arguments) in cases {
+        let response = process.exchange(
+            id,
+            "tools/call",
+            json!({"name":"draw_batch","arguments": arguments}),
+        );
+        assert!(tool_failed(&response), "{response}");
+    }
+    let direct = process.exchange(
+        17,
+        "tools/call",
+        json!({"name":"draw_motif","arguments":{"name":"十字","x":0,"y":0,"color":"H7","fill":true}}),
+    );
+    assert!(tool_failed(&direct), "{direct}");
+    let still = process.request(
+        18,
+        "tools/call",
+        json!({"name":"save_image","arguments":{"filename":"motif-still","output":"pixel"}}),
+    );
+    assert_eq!(response_png(&still), batch_png);
+
+    process.request(19, "tools/call", json!({"name":"undo","arguments":{}}));
+    let restored = process.request(
+        20,
+        "tools/call",
+        json!({"name":"save_image","arguments":{"filename":"motif-restored","output":"pixel"}}),
+    );
+    assert_eq!(response_png(&restored), blank);
+
+    let clipped = process.request(
+        21,
+        "tools/call",
+        json!({"name":"draw_motif","arguments":{"name":"感叹号","x":7,"y":5,"color":"H7","scale":2}}),
+    );
+    let clipped_img = image::load_from_memory(&response_png(&clipped))
+        .unwrap()
+        .to_rgb8();
+    for (x, y) in [(7, 5), (7, 6), (7, 7)] {
+        assert_eq!(cell(&clipped_img, x, y), black, "clipped {x},{y}");
+    }
+    assert_eq!(cell(&clipped_img, 6, 5), white);
+    assert_eq!(cell(&clipped_img, 7, 4), white);
+
+    process.request(
+        22,
+        "tools/call",
+        json!({"name":"create_canvas","arguments":{"width":4,"height":4,"palette":"24","background":"empty"}}),
+    );
+    let beads = process.request(
+        23,
+        "tools/call",
+        json!({"name":"draw_motif","arguments":{"name":"斜线-短","x":0,"y":0,"color":"H2"}}),
+    );
+    let bead_png = tool_png(&beads);
+    let bead_img = image::load_from_memory(&bead_png).unwrap().to_rgba8();
+    assert_eq!((bead_img.width(), bead_img.height()), (32, 32));
+    assert_eq!(bead_img.get_pixel(0, 0).0, [254, 255, 255, 255]);
+    assert_eq!(bead_img.get_pixel(8, 8).0, [254, 255, 255, 255]);
+    assert_eq!(bead_img.get_pixel(8, 0).0[3], 0);
+    assert_eq!(bead_img.get_pixel(0, 8).0[3], 0);
+
+    process.request(
+        24,
+        "tools/call",
+        json!({"name":"create_canvas","arguments":{"width":4,"height":4,"palette":"24"}}),
+    );
+    let spaces = process.request(
+        25,
+        "tools/call",
+        json!({"name":"draw_motif","arguments":{"name":"斜线-短","x":0,"y":0,"color":"-"}}),
+    );
+    let space_png = tool_png(&spaces);
+    let space_img = image::load_from_memory(&space_png).unwrap().to_rgba8();
+    assert_eq!((space_img.width(), space_img.height()), (32, 32));
+    assert_eq!(space_img.get_pixel(0, 0).0[3], 0);
+    assert_eq!(space_img.get_pixel(8, 8).0[3], 0);
+    assert_eq!(space_img.get_pixel(8, 0).0, [254, 255, 255, 255]);
+    assert_eq!(space_img.get_pixel(0, 8).0, [254, 255, 255, 255]);
 }
