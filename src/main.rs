@@ -1,4 +1,5 @@
 mod canvas;
+mod motif;
 mod palette;
 mod pattern;
 mod server;
