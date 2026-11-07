@@ -201,11 +201,13 @@ pub struct DrawMotifRequest {
     pub y: u32,
     /// 一种规范化色号（当前色表的中文名或 MARD 色号）。用 - 清为空格（不是 H2 白豆）
     pub color: String,
-    /// 逐格放大倍数，1–8 的整数，默认 1。每一占用格铺成 scale×scale 实心方块
-    #[serde(default)]
+    /// 逐格放大倍数，1–8 的整数。省略表示 1。显式 null 非法。每一占用格铺成 scale×scale 实心方块
+    #[serde(default, deserialize_with = "deserialize_motif_scale")]
+    #[schemars(with = "u32", range(min = 1, max = 8))]
     pub scale: Option<u32>,
-    /// 仅「骰子面」接受，取 1–6。其他图形名不能传
-    #[serde(default)]
+    /// 仅「骰子面」接受，取 1–6。省略表示不指定。显式 null 仍算传入，非法
+    #[serde(default, deserialize_with = "deserialize_motif_face")]
+    #[schemars(with = "u32", range(min = 1, max = 6))]
     pub face: Option<u32>,
 }
 
@@ -391,9 +393,11 @@ pub enum DrawOp {
         x: u32,
         y: u32,
         color: String,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "deserialize_motif_scale")]
+        #[schemars(with = "u32", range(min = 1, max = 8))]
         scale: Option<u32>,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "deserialize_motif_face")]
+        #[schemars(with = "u32", range(min = 1, max = 6))]
         face: Option<u32>,
     },
 }
@@ -696,7 +700,7 @@ impl PixelDraw {
     }
 
     #[tool(
-        description = "盖一个预置小图形到当前图纸。name 为图形名；x、y 是它占据矩形（放大后即放大矩形）的左上角，必须在图纸内，不提供中心锚定。一次只上一种规范化色号 color（当前色表的中文名或 MARD 色号）；用 - 清为空格（不是 H2 白豆）。scale 为 1–8 的整数逐格放大倍数，默认 1：每一占用格铺成 scale×scale 实心方块，不插值、不改形状。只盖占用格，占位里的空位不写。越出画布的部分裁剪。覆盖已有内容，包括盖成空格。不改动已记录的背景色。一次盖印记一步 undo；没有格子被写到时不记步。draw_batch 里 type 为 motif，整批记一步。图形名不存在、骰子面缺 face 或超出 1–6、非骰子面传了 face、scale 不是 1–8、颜色非法、落点越界时整次拒绝，画布不变、不记 undo。返回 8 倍放大 PNG。小图形共 32 个图形名（骰子面按 face 展开 6 份点阵）：十字（3×3、5 格）、叉（3×3、5 格）、品字-缺左上（2×2、3 格）、品字-缺右上（2×2、3 格）、斜线-短（2×2、2 格）、斜线-长（3×3、3 格）、四点（3×3、4 格）、T字-下（3×3、5 格）、T字-上（3×3、5 格）、T字-右（3×3、5 格）、T字-左（3×3、5 格）、拐角-左上（2×2、3 格）、拐角-右上（2×2、3 格）、拐角-左下（2×2、3 格）、拐角-右下（2×2、3 格）、箭头-上（3×4、6 格）、箭头-下（3×4、6 格）、箭头-左（4×3、6 格）、箭头-右（4×3、6 格）、对勾（3×3、4 格）、感叹号（1×5、4 格）、四芒闪光（3×3、4 格）、五角星（5×5、13 格）、闪电（3×5、7 格）、小爱心（5×4、11 格）、水滴（3×4、7 格）、小花（5×5、13 格）、骰子面（3×3，face=1 为 1 格、face=2 为 2 格、face=3 为 3 格、face=4 为 4 格、face=5 为 5 格、face=6 为 6 格）、扑克-红心（5×4、11 格，与小爱心同一点阵）、扑克-方块（5×5、13 格）、扑克-梅花（5×5、12 格）、扑克-黑桃（5×5、13 格）。箭头-左的规格书末行写成 `. . # . .`（比声明的 4 列多一个空位）；锁定点阵为 4×3 的 .#../####/..#.，六个占用格坐标不变，不改成箭头-右的左右镜像。"
+        description = "盖一个预置小图形到当前图纸。name 为图形名；x、y 是它占据矩形（放大后即放大矩形）的左上角，必须在图纸内，不提供中心锚定。一次只上一种规范化色号 color（当前色表的中文名或 MARD 色号）；用 - 清为空格（不是 H2 白豆）。scale 为 1–8 的整数逐格放大倍数，省略时为 1：每一占用格铺成 scale×scale 实心方块，不插值、不改形状。显式 null、小数、字符串或布尔值都不是合法整数，会拒绝。face 省略表示不指定；显式 null 仍算传入并拒绝。只盖占用格，占位里的空位不写。越出画布的部分裁剪。覆盖已有内容，包括盖成空格。不改动已记录的背景色。一次盖印记一步 undo；没有格子被写到时不记步，也不改动已有的 undo 历史。draw_batch 里 type 为 motif，整批记一步。图形名不存在、骰子面缺 face 或超出 1–6、非骰子面传了 face（含 null）、scale 不是 1–8（含 null）、颜色非法、落点越界时整次拒绝，画布不变、不记 undo。返回 8 倍放大 PNG。小图形共 32 个图形名（骰子面按 face 展开 6 份点阵）：十字（3×3、5 格）、叉（3×3、5 格）、品字-缺左上（2×2、3 格）、品字-缺右上（2×2、3 格）、斜线-短（2×2、2 格）、斜线-长（3×3、3 格）、四点（3×3、4 格）、T字-下（3×3、5 格）、T字-上（3×3、5 格）、T字-右（3×3、5 格）、T字-左（3×3、5 格）、拐角-左上（2×2、3 格）、拐角-右上（2×2、3 格）、拐角-左下（2×2、3 格）、拐角-右下（2×2、3 格）、箭头-上（3×4、6 格）、箭头-下（3×4、6 格）、箭头-左（4×3、6 格）、箭头-右（4×3、6 格）、对勾（3×3、4 格）、感叹号（1×5、4 格）、四芒闪光（3×3、4 格）、五角星（5×5、13 格）、闪电（3×5、7 格）、小爱心（5×4、11 格）、水滴（3×4、7 格）、小花（5×5、13 格）、骰子面（3×3，face=1 为 1 格、face=2 为 2 格、face=3 为 3 格、face=4 为 4 格、face=5 为 5 格、face=6 为 6 格）、扑克-红心（5×4、11 格，与小爱心同一点阵）、扑克-方块（5×5、13 格）、扑克-梅花（5×5、12 格）、扑克-黑桃（5×5、13 格）。箭头-左的规格书末行写成 `. . # . .`（比声明的 4 列多一个空位）；锁定点阵为 4×3 的 .#../####/..#.，六个占用格坐标不变，不改成箭头-右的左右镜像。"
     )]
     async fn draw_motif(
         &self,
@@ -1014,9 +1018,118 @@ impl ServerHandler for PixelDraw {
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(
-                "PixelDraw：用强约束像素指令绘图，不要直接文生图。尽量使用像素绘制；其他图元仅用于大面积绘制。多笔绘制请一次调用 draw_batch（ops 有序数组，原子执行，只回最终预览）；单笔可用 draw_line / draw_rect / draw_triangle / draw_circle / draw_ellipse / draw_diamond / draw_curve / flood_fill / fill_background / draw_pixels / draw_motif / move_region / copy_region。禁止并行调用多个绘制工具，会打乱顺序。流程：create_canvas(width, height, palette?, background?, background_color?) 建图并锁定色表 → draw_batch 或单笔工具作画 → 看 8 倍预览继续修改调整（画错可用 undo 撤回）→ save_image 保存。矩形、三角形、圆、椭圆、菱形用 fill=true|false 区分填充/描边；直线、曲线与描边可用 brush=1|2|4|8 控制线宽（从落点向右下扩展 N×N，与 draw_pixels 足迹一致）。圆用左上角 (x,y) 与直径 diameter，椭圆用左上角 (x,y)、宽 width 与高 height（均为 ≥1 的整数，超过 512 按 512；锚点越界报错，右侧和下方裁剪；旧的 cx/cy/radius/rx/ry 会报错）。像素菱形 draw_diamond 用中心格 (cx,cy) 与菱形半轴 rx、ry（宽高为 2*rx+1 与 2*ry+1，总是奇数；超过 255 按 255；不是左上角锚定，也不是已废止的椭圆 rx/ry）。中心格必须在图纸内，越过边缘的部分裁剪。draw_motif 按图形名把预置小图形盖到左上角 (x,y)，一次一种规范化色号（- 清为空格，不是 H2 白豆），scale 为 1–8 的整数逐格放大（默认 1），越出图纸的部分裁剪；face 只给骰子面，取 1–6。不改背景色。图形名不存在、点数缺失或越界、非骰子面传了点数、scale 非法、颜色非法或落点越界时整次拒绝。也可作为 draw_batch 的 motif 操作。小图形共 32 个图形名（骰子面按 face 展开 6 份点阵）：十字（3×3、5 格）、叉（3×3、5 格）、品字-缺左上（2×2、3 格）、品字-缺右上（2×2、3 格）、斜线-短（2×2、2 格）、斜线-长（3×3、3 格）、四点（3×3、4 格）、T字-下（3×3、5 格）、T字-上（3×3、5 格）、T字-右（3×3、5 格）、T字-左（3×3、5 格）、拐角-左上（2×2、3 格）、拐角-右上（2×2、3 格）、拐角-左下（2×2、3 格）、拐角-右下（2×2、3 格）、箭头-上（3×4、6 格）、箭头-下（3×4、6 格）、箭头-左（4×3、6 格）、箭头-右（4×3、6 格）、对勾（3×3、4 格）、感叹号（1×5、4 格）、四芒闪光（3×3、4 格）、五角星（5×5、13 格）、闪电（3×5、7 格）、小爱心（5×4、11 格）、水滴（3×4、7 格）、小花（5×5、13 格）、骰子面（3×3，face=1 为 1 格、face=2 为 2 格、face=3 为 3 格、face=4 为 4 格、face=5 为 5 格、face=6 为 6 格）、扑克-红心（5×4、11 格，与小爱心同一点阵）、扑克-方块（5×5、13 格）、扑克-梅花（5×5、12 格）、扑克-黑桃（5×5、13 格）。箭头-左锁定点阵为 4×3 的 .#../####/..#.（规格书末行多出的一格空位不占宽），不改成箭头-右的左右镜像。draw_curve 的 points 为 [x,y] 列表：2 点直线、3 点二次贝塞尔、4 点三次贝塞尔、≥5 点过点平滑样条。fill_background 用一种颜色覆盖整张图纸的每一个格子，并把当前背景色改为该颜色。move_region 把矩形区域（含空格）搬到 dx/dy 或 tx/ty 指定的位置，源区域改回当前背景色；copy_region 同样搬运但保留源区域。两组寻址只能给一组，源端点或目标越界整次拒绝。draw_pixels、flood_fill 与 draw_motif 可用 - 清除为空格（不是 H2 白豆）；background 可选 white（默认）或 empty；background_color 可选，用色表颜色铺满并记为当前背景色。list_colors 只在需要查色时调用。颜色只用当前模式的中文名或 MARD 色号。save_image 的 output 可选 pixel（默认 8 倍 PNG）、pattern（拼豆图纸）或 both；不覆盖已有文件。",
+                "PixelDraw：用强约束像素指令绘图，不要直接文生图。尽量使用像素绘制；其他图元仅用于大面积绘制。多笔绘制请一次调用 draw_batch（ops 有序数组，原子执行，只回最终预览）；单笔可用 draw_line / draw_rect / draw_triangle / draw_circle / draw_ellipse / draw_diamond / draw_curve / flood_fill / fill_background / draw_pixels / draw_motif / move_region / copy_region。禁止并行调用多个绘制工具，会打乱顺序。流程：create_canvas(width, height, palette?, background?, background_color?) 建图并锁定色表 → draw_batch 或单笔工具作画 → 看 8 倍预览继续修改调整（画错可用 undo 撤回）→ save_image 保存。矩形、三角形、圆、椭圆、菱形用 fill=true|false 区分填充/描边；直线、曲线与描边可用 brush=1|2|4|8 控制线宽（从落点向右下扩展 N×N，与 draw_pixels 足迹一致）。圆用左上角 (x,y) 与直径 diameter，椭圆用左上角 (x,y)、宽 width 与高 height（均为 ≥1 的整数，超过 512 按 512；锚点越界报错，右侧和下方裁剪；旧的 cx/cy/radius/rx/ry 会报错）。像素菱形 draw_diamond 用中心格 (cx,cy) 与菱形半轴 rx、ry（宽高为 2*rx+1 与 2*ry+1，总是奇数；超过 255 按 255；不是左上角锚定，也不是已废止的椭圆 rx/ry）。中心格必须在图纸内，越过边缘的部分裁剪。draw_motif 按图形名把预置小图形盖到左上角 (x,y)，一次一种规范化色号（- 清为空格，不是 H2 白豆），scale 省略时为 1，传入时必须是 1–8 的整数（显式 null 非法），越出图纸的部分裁剪；face 只给骰子面，取 1–6，省略表示不指定，显式 null 仍算传入并拒绝。不改背景色。图形名不存在、点数缺失或越界、非骰子面传了点数、scale 非法、颜色非法或落点越界时整次拒绝。没有格子被写到时不记 undo，也不丢掉已有历史。也可作为 draw_batch 的 motif 操作。小图形共 32 个图形名（骰子面按 face 展开 6 份点阵）：十字（3×3、5 格）、叉（3×3、5 格）、品字-缺左上（2×2、3 格）、品字-缺右上（2×2、3 格）、斜线-短（2×2、2 格）、斜线-长（3×3、3 格）、四点（3×3、4 格）、T字-下（3×3、5 格）、T字-上（3×3、5 格）、T字-右（3×3、5 格）、T字-左（3×3、5 格）、拐角-左上（2×2、3 格）、拐角-右上（2×2、3 格）、拐角-左下（2×2、3 格）、拐角-右下（2×2、3 格）、箭头-上（3×4、6 格）、箭头-下（3×4、6 格）、箭头-左（4×3、6 格）、箭头-右（4×3、6 格）、对勾（3×3、4 格）、感叹号（1×5、4 格）、四芒闪光（3×3、4 格）、五角星（5×5、13 格）、闪电（3×5、7 格）、小爱心（5×4、11 格）、水滴（3×4、7 格）、小花（5×5、13 格）、骰子面（3×3，face=1 为 1 格、face=2 为 2 格、face=3 为 3 格、face=4 为 4 格、face=5 为 5 格、face=6 为 6 格）、扑克-红心（5×4、11 格，与小爱心同一点阵）、扑克-方块（5×5、13 格）、扑克-梅花（5×5、12 格）、扑克-黑桃（5×5、13 格）。箭头-左锁定点阵为 4×3 的 .#../####/..#.（规格书末行多出的一格空位不占宽），不改成箭头-右的左右镜像。draw_curve 的 points 为 [x,y] 列表：2 点直线、3 点二次贝塞尔、4 点三次贝塞尔、≥5 点过点平滑样条。fill_background 用一种颜色覆盖整张图纸的每一个格子，并把当前背景色改为该颜色。move_region 把矩形区域（含空格）搬到 dx/dy 或 tx/ty 指定的位置，源区域改回当前背景色；copy_region 同样搬运但保留源区域。两组寻址只能给一组，源端点或目标越界整次拒绝。draw_pixels、flood_fill 与 draw_motif 可用 - 清除为空格（不是 H2 白豆）；background 可选 white（默认）或 empty；background_color 可选，用色表颜色铺满并记为当前背景色。list_colors 只在需要查色时调用。颜色只用当前模式的中文名或 MARD 色号。save_image 的 output 可选 pixel（默认 8 倍 PNG）、pattern（拼豆图纸）或 both；不覆盖已有文件。",
             )
     }
+}
+
+fn deserialize_motif_scale<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_bounded_integer(deserializer, 1, 8, "scale")
+}
+
+fn deserialize_motif_face<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_bounded_integer(deserializer, 1, 6, "face")
+}
+
+/// Present optional integers. Omission is handled by `#[serde(default)]` and
+/// never reaches here. JSON `null` is present and rejected, as are non-integers
+/// and values outside `min..=max`.
+fn deserialize_bounded_integer<'de, D>(
+    deserializer: D,
+    min: u32,
+    max: u32,
+    field: &'static str,
+) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct Bounded {
+        min: u32,
+        max: u32,
+        field: &'static str,
+    }
+
+    impl<'de> serde::de::Visitor<'de> for Bounded {
+        type Value = Option<u32>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                formatter,
+                "an integer from {} to {} for {}",
+                self.min, self.max, self.field
+            )
+        }
+
+        fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
+            let value = u32::try_from(value).map_err(E::custom)?;
+            if (self.min..=self.max).contains(&value) {
+                Ok(Some(value))
+            } else {
+                Err(E::custom(format!(
+                    "{field} 必须是 {min} 到 {max} 的整数，当前为 {value}。",
+                    field = self.field,
+                    min = self.min,
+                    max = self.max
+                )))
+            }
+        }
+
+        fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
+            if value < 0 {
+                return Err(E::custom(format!(
+                    "{field} 必须是 {min} 到 {max} 的整数，当前为 {value}。",
+                    field = self.field,
+                    min = self.min,
+                    max = self.max
+                )));
+            }
+            self.visit_u64(value as u64)
+        }
+
+        fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Self::Value, E> {
+            Err(E::custom(format!(
+                "{field} 必须是 {min} 到 {max} 的整数，当前为小数 {value}。",
+                field = self.field,
+                min = self.min,
+                max = self.max
+            )))
+        }
+
+        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+            Err(E::custom(format!(
+                "{field} 必须是 {min} 到 {max} 的整数，当前为字符串「{value}」。",
+                field = self.field,
+                min = self.min,
+                max = self.max
+            )))
+        }
+
+        fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<Self::Value, E> {
+            Err(E::custom(format!(
+                "{field} 必须是 {min} 到 {max} 的整数，当前为布尔值 {value}。",
+                field = self.field,
+                min = self.min,
+                max = self.max
+            )))
+        }
+
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Err(E::custom(format!(
+                "{field} 不能为 null。省略该字段；传入时必须是 {min} 到 {max} 的整数。",
+                field = self.field,
+                min = self.min,
+                max = self.max
+            )))
+        }
+    }
+
+    deserializer.deserialize_any(Bounded { min, max, field })
 }
 
 fn apply_draw_op(canvas: &mut Canvas, op: &DrawOp) -> Result<usize, CanvasError> {
@@ -1589,6 +1702,118 @@ mod tests {
                 ..
             } if name == "骰子面"
         ));
+
+        let scaled: DrawMotifRequest =
+            serde_json::from_str(r#"{"name":"斜线-短","x":0,"y":0,"color":"H7","scale":8}"#)
+                .unwrap();
+        assert_eq!(scaled.scale, Some(8));
+        assert!(scaled.face.is_none());
+        let dice_face: DrawOp = serde_json::from_str(
+            r#"{"type":"motif","name":"骰子面","x":0,"y":0,"color":"H7","face":6,"scale":1}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            dice_face,
+            DrawOp::Motif {
+                face: Some(6),
+                scale: Some(1),
+                ..
+            }
+        ));
+
+        for json in [
+            r#"{"name":"十字","x":0,"y":0,"color":"H7","scale":null}"#,
+            r#"{"name":"十字","x":0,"y":0,"color":"H7","scale":0}"#,
+            r#"{"name":"十字","x":0,"y":0,"color":"H7","scale":9}"#,
+            r#"{"name":"十字","x":0,"y":0,"color":"H7","scale":-1}"#,
+            r#"{"name":"十字","x":0,"y":0,"color":"H7","scale":1.5}"#,
+            r#"{"name":"十字","x":0,"y":0,"color":"H7","scale":"2"}"#,
+            r#"{"name":"十字","x":0,"y":0,"color":"H7","scale":true}"#,
+            r#"{"name":"十字","x":0,"y":0,"color":"H7","face":null}"#,
+            r#"{"name":"骰子面","x":0,"y":0,"color":"H7","face":null}"#,
+            r#"{"name":"骰子面","x":0,"y":0,"color":"H7","face":0}"#,
+            r#"{"name":"骰子面","x":0,"y":0,"color":"H7","face":7}"#,
+            r#"{"name":"骰子面","x":0,"y":0,"color":"H7","face":-1}"#,
+            r#"{"name":"骰子面","x":0,"y":0,"color":"H7","face":1.5}"#,
+            r#"{"name":"骰子面","x":0,"y":0,"color":"H7","face":"6"}"#,
+            r#"{"name":"骰子面","x":0,"y":0,"color":"H7","face":false}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<DrawMotifRequest>(json).is_err(),
+                "{json}"
+            );
+        }
+        // face 1 on 十字 is a legal integer; the name check happens later.
+        let stray: DrawMotifRequest =
+            serde_json::from_str(r#"{"name":"十字","x":0,"y":0,"color":"H7","face":1}"#).unwrap();
+        assert_eq!(stray.face, Some(1));
+        for json in [
+            r#"{"type":"motif","name":"十字","x":0,"y":0,"color":"H7","scale":null}"#,
+            r#"{"type":"motif","name":"十字","x":0,"y":0,"color":"H7","scale":0}"#,
+            r#"{"type":"motif","name":"十字","x":0,"y":0,"color":"H7","scale":9}"#,
+            r#"{"type":"motif","name":"十字","x":0,"y":0,"color":"H7","scale":-1}"#,
+            r#"{"type":"motif","name":"十字","x":0,"y":0,"color":"H7","scale":1.5}"#,
+            r#"{"type":"motif","name":"十字","x":0,"y":0,"color":"H7","scale":"8"}"#,
+            r#"{"type":"motif","name":"十字","x":0,"y":0,"color":"H7","scale":false}"#,
+            r#"{"type":"motif","name":"十字","x":0,"y":0,"color":"H7","face":null}"#,
+            r#"{"type":"motif","name":"骰子面","x":0,"y":0,"color":"H7","face":null}"#,
+            r#"{"type":"motif","name":"骰子面","x":0,"y":0,"color":"H7","face":0}"#,
+            r#"{"type":"motif","name":"骰子面","x":0,"y":0,"color":"H7","face":9}"#,
+            r#"{"type":"motif","name":"骰子面","x":0,"y":0,"color":"H7","face":1.5}"#,
+            r#"{"type":"motif","name":"骰子面","x":0,"y":0,"color":"H7","face":"1"}"#,
+            r#"{"type":"motif","name":"骰子面","x":0,"y":0,"color":"H7","face":true}"#,
+        ] {
+            assert!(serde_json::from_str::<DrawOp>(json).is_err(), "{json}");
+        }
+
+        let request = serde_json::to_value(schemars::schema_for!(DrawMotifRequest)).unwrap();
+        assert_optional_integer(&request, "scale", 1, 8);
+        assert_optional_integer(&request, "face", 1, 6);
+        let op = serde_json::to_value(schemars::schema_for!(DrawOp)).unwrap();
+        assert_optional_integer(&op, "scale", 1, 8);
+        assert_optional_integer(&op, "face", 1, 6);
+    }
+
+    fn assert_optional_integer(schema: &serde_json::Value, name: &str, min: i64, max: i64) {
+        let owner = find_properties_with(schema, name)
+            .unwrap_or_else(|| panic!("{name} missing from {schema}"));
+        let field = &owner["properties"][name];
+        assert_eq!(field["type"], "integer", "{name}: {field}");
+        assert!(
+            field.get("type").and_then(|ty| ty.as_array()).is_none(),
+            "{name} must not be nullable: {field}"
+        );
+        assert_eq!(field["minimum"], min, "{name}: {field}");
+        assert_eq!(field["maximum"], max, "{name}: {field}");
+        if let Some(required) = owner["required"].as_array() {
+            assert!(
+                required.iter().all(|item| item != name),
+                "{name} should be optional in {required:?}"
+            );
+        }
+    }
+
+    fn find_properties_with<'a>(
+        schema: &'a serde_json::Value,
+        name: &str,
+    ) -> Option<&'a serde_json::Value> {
+        match schema {
+            serde_json::Value::Object(map) => {
+                if map
+                    .get("properties")
+                    .and_then(|props| props.get(name))
+                    .is_some()
+                {
+                    return Some(schema);
+                }
+                map.values()
+                    .find_map(|child| find_properties_with(child, name))
+            }
+            serde_json::Value::Array(items) => items
+                .iter()
+                .find_map(|child| find_properties_with(child, name)),
+            _ => None,
+        }
     }
 
     #[test]
@@ -2474,6 +2699,127 @@ mod tests {
             before
         );
         assert_eq!(server.canvas.lock().await.as_ref().unwrap().undo_len(), 1);
+    }
+
+    #[tokio::test]
+    async fn clipped_motif_keeps_full_history_and_scale_eight_paints() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = PixelDraw::new(dir.path().to_path_buf());
+        server
+            .create_canvas(Parameters(CreateCanvasRequest {
+                background: Background::White,
+                background_color: None,
+                width: 4,
+                height: 4,
+                palette: Some("24".into()),
+            }))
+            .await
+            .unwrap();
+        for i in 0..64u32 {
+            let drawn = server
+                .draw_pixels(Parameters(DrawPixelsRequest {
+                    pixels: format!("{} {} H7", i % 4, (i / 4) % 4),
+                    brush: None,
+                }))
+                .await
+                .unwrap();
+            assert_ne!(drawn.is_error, Some(true), "{drawn:?}");
+        }
+        let (before, png) = {
+            let guard = server.canvas.lock().await;
+            let canvas = guard.as_ref().unwrap();
+            assert_eq!(canvas.undo_len(), 64);
+            (canvas.codes().to_vec(), canvas.encode_png_8x().unwrap())
+        };
+        let clipped = server
+            .draw_motif(Parameters(DrawMotifRequest {
+                name: "十字".into(),
+                x: 3,
+                y: 3,
+                color: "H7".into(),
+                scale: None,
+                face: None,
+            }))
+            .await
+            .unwrap();
+        assert_ne!(clipped.is_error, Some(true), "{clipped:?}");
+        assert!(
+            clipped.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("已绘制 0 个像素")
+        );
+        let batched = server
+            .draw_batch(Parameters(DrawBatchRequest {
+                ops: vec![DrawOp::Motif {
+                    name: "十字".into(),
+                    x: 3,
+                    y: 3,
+                    color: "H7".into(),
+                    scale: Some(8),
+                    face: None,
+                }],
+            }))
+            .await
+            .unwrap();
+        assert_ne!(batched.is_error, Some(true), "{batched:?}");
+        {
+            let guard = server.canvas.lock().await;
+            let canvas = guard.as_ref().unwrap();
+            assert_eq!(canvas.undo_len(), 64);
+            assert_eq!(canvas.codes(), before.as_slice());
+            assert_eq!(canvas.encode_png_8x().unwrap(), png);
+            assert_eq!(canvas.background_code(), Some("H2"));
+        }
+        canvas_undo_all(&server, 64).await;
+        assert_eq!(server.canvas.lock().await.as_ref().unwrap().undo_len(), 0);
+
+        server
+            .create_canvas(Parameters(CreateCanvasRequest {
+                background: Background::White,
+                background_color: None,
+                width: 16,
+                height: 16,
+                palette: Some("24".into()),
+            }))
+            .await
+            .unwrap();
+        let scaled = server
+            .draw_motif(Parameters(DrawMotifRequest {
+                name: "斜线-短".into(),
+                x: 0,
+                y: 0,
+                color: "H7".into(),
+                scale: Some(8),
+                face: None,
+            }))
+            .await
+            .unwrap();
+        assert_ne!(scaled.is_error, Some(true), "{scaled:?}");
+        assert!(
+            scaled.content[0]
+                .as_text()
+                .unwrap()
+                .text
+                .contains("已绘制 128 个像素")
+        );
+        {
+            let guard = server.canvas.lock().await;
+            let canvas = guard.as_ref().unwrap();
+            assert_eq!(canvas.undo_len(), 1);
+            assert_eq!(canvas.codes()[0], Some("H7"));
+            assert_eq!(canvas.codes()[8], Some("H2"));
+            assert_eq!(canvas.codes()[8 * 16 + 8], Some("H7"));
+            assert_eq!(canvas.background_code(), Some("H2"));
+        }
+    }
+
+    async fn canvas_undo_all(server: &PixelDraw, steps: u32) {
+        server
+            .undo(Parameters(UndoRequest { steps: Some(steps) }))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

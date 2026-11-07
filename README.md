@@ -209,7 +209,7 @@ Each file is saved atomically. `both` checks both names before writing, so exist
 | `copy_region` | Same parameters as `move_region`. The source stays, and empty cells overwrite the destination. |
 | `draw_batch` | Ordered atomic batch; any failure rejects the whole batch; one final preview and one undo step. Ops include `fill_background`, `move_region`, `copy_region`, and `motif`. |
 | `draw_pixels` | Whitespace-separated `x y color` triples; `-` clears a cell. |
-| `draw_motif` | Places one embedded motif by Chinese name at the top-left `(x, y)` of its bounding box (the scaled box when `scale` is set). One canonical color per call; `-` clears cells to empty, which is distinct from an H2 white bead. `scale` is an integer 1–8 (default 1): each occupied cell becomes a solid `scale×scale` block. Gaps in the bitmap are not painted. The anchor must be on the canvas; overflow is clipped. Existing cells are overwritten. The remembered background color is unchanged. One undo step per call, or none when every occupied cell is clipped away. Unknown names, a missing or out-of-range dice `face`, a `face` on any other name, a `scale` outside 1–8, an unknown color, or an anchor outside the canvas reject the call with the canvas unchanged. Also a `draw_batch` op (`type: motif`). |
+| `draw_motif` | Places one embedded motif by Chinese name at the top-left `(x, y)` of its bounding box (the scaled box when `scale` is set). One canonical color per call; `-` clears cells to empty, which is distinct from an H2 white bead. `scale` is an integer 1–8; omitting it means 1, and JSON `null` is rejected. Each occupied cell becomes a solid `scale×scale` block. Gaps in the bitmap are not painted. The anchor must be on the canvas; overflow is clipped. Existing cells are overwritten. The remembered background color is unchanged. One undo step per call, or none when every occupied cell is clipped away. Unknown names, a missing or out-of-range dice `face`, a `face` on any other name, a `scale` outside 1–8, an unknown color, or an anchor outside the canvas reject the call with the canvas unchanged. Also a `draw_batch` op (`type: motif`). |
 | `undo` | Reverses recent drawing steps (`steps` optional, default 1). Successful draws are one step each; `draw_batch` is one step; `create_canvas` clears history. |
 | `save_image` | Exports `pixel` (default), `pattern`, or `both` as PNG without overwriting existing files. |
 
@@ -239,8 +239,9 @@ Each file is saved atomically. `both` checks both names before writing, so exist
   destination rectangle falls outside the canvas; the canvas and undo history
   stay unchanged.
   A motif anchor `(x, y)` must stay inside the canvas. `scale` is an integer
-  from 1 to 8 and defaults to 1. `face` belongs only to 骰子面 and is an
-  integer from 1 to 6. 箭头-左 is locked at 4×3 as `.#../####/..#.`: the spec
+  from 1 to 8; omitting it means 1, and JSON `null` is rejected. `face`
+  belongs only to 骰子面 and is an integer from 1 to 6. Omitting `face` means
+  it was not supplied; JSON `null` still counts as supplied and is rejected. 箭头-左 is locked at 4×3 as `.#../####/..#.`: the spec
   row `. . # . .` has one extra empty cell past the declared width. That cell
   is dropped, the six occupied coordinates stay, and the bitmap is not
   replaced by the left-right mirror of 箭头-右.

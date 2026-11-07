@@ -1319,6 +1319,14 @@ fn stdio_motif_places_named_patterns() {
             .iter()
             .all(|item| item != "scale" && item != "face")
     );
+    assert_eq!(props["scale"]["type"], "integer", "{}", props["scale"]);
+    assert_eq!(props["scale"]["minimum"], 1);
+    assert_eq!(props["scale"]["maximum"], 8);
+    assert!(props["scale"]["type"].as_array().is_none());
+    assert_eq!(props["face"]["type"], "integer", "{}", props["face"]);
+    assert_eq!(props["face"]["minimum"], 1);
+    assert_eq!(props["face"]["maximum"], 6);
+    assert!(props["face"]["type"].as_array().is_none());
     let batch = tools
         .iter()
         .find(|tool| tool["name"] == "draw_batch")
@@ -1512,4 +1520,141 @@ fn stdio_motif_places_named_patterns() {
     assert_eq!(space_img.get_pixel(8, 8).0[3], 0);
     assert_eq!(space_img.get_pixel(8, 0).0, [254, 255, 255, 255]);
     assert_eq!(space_img.get_pixel(0, 8).0, [254, 255, 255, 255]);
+}
+
+#[test]
+fn stdio_motif_null_fields_reject_without_touching_history() {
+    let output = tempfile::tempdir().unwrap();
+    let mut process = Process::spawn(
+        output.path(),
+        &[
+            std::ffi::OsStr::new("--output-dir"),
+            output.path().as_os_str(),
+        ],
+    );
+    process.request(
+        1,
+        "initialize",
+        json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "motif-null-test", "version": "1"}
+        }),
+    );
+    process.send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+    let created = process.request(
+        2,
+        "tools/call",
+        json!({"name":"create_canvas","arguments":{"width":8,"height":8,"palette":"24"}}),
+    );
+    let blank = response_png(&created);
+    let drawn = process.request(
+        3,
+        "tools/call",
+        json!({"name":"draw_pixels","arguments":{"pixels":"0 0 H7"}}),
+    );
+    let painted = response_png(&drawn);
+
+    let mut id = 4u64;
+    let direct_bad = [
+        json!({"name":"十字","x":0,"y":0,"color":"H7","scale":null}),
+        json!({"name":"十字","x":0,"y":0,"color":"H7","scale":0}),
+        json!({"name":"十字","x":0,"y":0,"color":"H7","scale":9}),
+        json!({"name":"十字","x":0,"y":0,"color":"H7","scale":-1}),
+        json!({"name":"十字","x":0,"y":0,"color":"H7","scale":1.5}),
+        json!({"name":"十字","x":0,"y":0,"color":"H7","scale":"2"}),
+        json!({"name":"十字","x":0,"y":0,"color":"H7","scale":true}),
+        json!({"name":"十字","x":0,"y":0,"color":"H7","face":null}),
+        json!({"name":"骰子面","x":0,"y":0,"color":"H7","face":null}),
+        json!({"name":"骰子面","x":0,"y":0,"color":"H7","face":0}),
+        json!({"name":"骰子面","x":0,"y":0,"color":"H7","face":7}),
+        json!({"name":"骰子面","x":0,"y":0,"color":"H7","face":-1}),
+        json!({"name":"骰子面","x":0,"y":0,"color":"H7","face":1.5}),
+        json!({"name":"骰子面","x":0,"y":0,"color":"H7","face":"6"}),
+        json!({"name":"骰子面","x":0,"y":0,"color":"H7","face":false}),
+    ];
+    for arguments in direct_bad {
+        let response = process.exchange(
+            id,
+            "tools/call",
+            json!({"name":"draw_motif","arguments": arguments}),
+        );
+        id += 1;
+        assert!(tool_failed(&response), "{arguments} -> {response}");
+    }
+    let batch_bad = [
+        json!(null),
+        json!(0),
+        json!(9),
+        json!(-1),
+        json!(1.5),
+        json!("8"),
+        json!(false),
+    ];
+    for scale in batch_bad {
+        let response = process.exchange(
+            id,
+            "tools/call",
+            json!({
+                "name": "draw_batch",
+                "arguments": {"ops": [
+                    {"type":"pixels","pixels":"1 0 F5"},
+                    {"type":"motif","name":"十字","x":0,"y":0,"color":"H7","scale": scale}
+                ]}
+            }),
+        );
+        id += 1;
+        assert!(tool_failed(&response), "scale {scale} -> {response}");
+    }
+    for face in [
+        json!(null),
+        json!(0),
+        json!(9),
+        json!(-1),
+        json!(2.5),
+        json!("1"),
+        json!(true),
+    ] {
+        let response = process.exchange(
+            id,
+            "tools/call",
+            json!({
+                "name": "draw_batch",
+                "arguments": {"ops": [
+                    {"type":"pixels","pixels":"2 0 A4"},
+                    {"type":"motif","name":"十字","x":1,"y":1,"color":"H7","face": face}
+                ]}
+            }),
+        );
+        id += 1;
+        assert!(tool_failed(&response), "face {face} -> {response}");
+    }
+
+    let still = process.request(
+        id,
+        "tools/call",
+        json!({"name":"save_image","arguments":{"filename":"motif-null-still","output":"pixel"}}),
+    );
+    id += 1;
+    assert_eq!(response_png(&still), painted);
+    let undone = process.request(id, "tools/call", json!({"name":"undo","arguments":{}}));
+    id += 1;
+    assert_eq!(response_png(&undone), blank);
+    let empty = process.exchange(id, "tools/call", json!({"name":"undo","arguments":{}}));
+    assert!(tool_failed(&empty), "{empty}");
+
+    let scaled = process.request(
+        id + 1,
+        "tools/call",
+        json!({"name":"draw_motif","arguments":{"name":"斜线-短","x":0,"y":0,"color":"H7","scale":8}}),
+    );
+    let img = image::load_from_memory(&response_png(&scaled))
+        .unwrap()
+        .to_rgb8();
+    let black = [0, 0, 0];
+    for x in 0..8u32 {
+        for y in 0..8u32 {
+            assert_eq!(cell(&img, x, y), black, "scale 8 {x},{y}");
+        }
+    }
 }

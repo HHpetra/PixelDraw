@@ -460,14 +460,36 @@ impl Canvas {
         Ok(self.stamp_points(points, Some(color), brush.size()))
     }
 
+    /// True when the `stamp`×`stamp` block with top-left `(x, y)` covers a canvas cell.
+    ///
+    /// Matches [`Self::stamp_block`]: cells outside the canvas are not writable.
+    fn block_hits_canvas(&self, x: i32, y: i32, stamp: u32) -> bool {
+        let Ok(n) = i32::try_from(stamp) else {
+            return false;
+        };
+        if n <= 0 {
+            return false;
+        }
+        let left = x.max(0);
+        let top = y.max(0);
+        let right = x.saturating_add(n).min(self.width as i32);
+        let bottom = y.saturating_add(n).min(self.height as i32);
+        left < right && top < bottom
+    }
+
     /// Stamp `stamp`×`stamp` blocks on pre-rasterized points.
     ///
     /// `None` clears those cells to empty (not an H2 bead). Blocks that fall
     /// outside the canvas are clipped. One undo step is recorded only when at
-    /// least one cell is written. The remembered background color is unchanged.
-    /// The returned count is distinct cells, not `points × stamp²`.
+    /// least one cell is written. The hit test happens before [`Self::push_undo`]:
+    /// pushing a snapshot and then discarding it would evict the oldest step
+    /// when the history is already full. The remembered background color is
+    /// unchanged. The returned count is distinct cells, not `points × stamp²`.
     fn stamp_points(&mut self, points: &[(i32, i32)], color: Option<&Color>, stamp: u32) -> usize {
-        if points.is_empty() {
+        if !points
+            .iter()
+            .any(|&(x, y)| self.block_hits_canvas(x, y, stamp))
+        {
             return 0;
         }
         self.push_undo();
@@ -476,9 +498,7 @@ impl Canvas {
         for &(x, y) in points {
             written += self.stamp_block(x, y, color, stamp, &mut touched);
         }
-        if written == 0 {
-            self.discard_undo();
-        }
+        debug_assert!(written > 0, "hit test and stamp_block disagreed");
         written
     }
 
@@ -3264,5 +3284,49 @@ mod tests {
         assert_eq!(cell(&canvas, 1, 0), Some("H2"));
         assert_eq!(cell(&canvas, 1, 1), Some("F5"));
         assert_eq!(canvas.undo_len(), 1);
+    }
+
+    #[test]
+    fn fully_clipped_motif_keeps_a_full_undo_history() {
+        // 十字 at the bottom-right of a 4×4 canvas is a legal anchor whose
+        // occupied cells all fall outside. Recording undo before that check
+        // used to evict the oldest snapshot and then pop the new one.
+        let mut canvas = Canvas::new(4, 4, PaletteMode::Colors24).unwrap();
+        let blank = canvas.codes().to_vec();
+        for i in 0..MAX_UNDO {
+            let x = (i % 4) as u32;
+            let y = ((i / 4) % 4) as u32;
+            let color = if i % 2 == 0 { "正红" } else { "纯黑" };
+            canvas.paint(&[stamp(x, y, color)], BrushSize::One).unwrap();
+        }
+        assert_eq!(canvas.undo_len(), MAX_UNDO);
+        let full = canvas.codes().to_vec();
+        let background = canvas.background_code();
+
+        let clipped_shape = canvas
+            .paint_shape_points(&[(10, 10), (-2, -2)], "纯黑", BrushSize::One)
+            .unwrap();
+        assert_eq!(clipped_shape, 0);
+        assert_eq!(canvas.undo_len(), MAX_UNDO);
+        assert_eq!(canvas.codes(), full.as_slice());
+
+        let clipped = canvas.paint_motif("十字", 3, 3, "H7", None, None).unwrap();
+        assert_eq!(clipped, 0);
+        assert_eq!(canvas.codes(), full.as_slice());
+        assert_eq!(canvas.background_code(), background);
+        assert_eq!(canvas.undo_len(), MAX_UNDO);
+
+        canvas.begin_batch();
+        let batched = canvas
+            .paint_motif("十字", 3, 3, "H7", Some(8), None)
+            .unwrap();
+        canvas.end_batch();
+        assert_eq!(batched, 0);
+        assert_eq!(canvas.undo_len(), MAX_UNDO);
+        assert_eq!(canvas.codes(), full.as_slice());
+
+        canvas.undo(MAX_UNDO).unwrap();
+        assert_eq!(canvas.codes(), blank.as_slice());
+        assert_eq!(canvas.undo_len(), 0);
     }
 }
